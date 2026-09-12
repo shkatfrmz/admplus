@@ -1,0 +1,8 @@
+node_modules/
+backend/data/
+frontend/dist/
+src/Admplus.Api/bin/
+src/Admplus.Api/obj/
+src/Admplus.Api/data/
+.DS_Store
+*.log
