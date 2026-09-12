@@ -9,15 +9,14 @@ Manages users (all types), computers, groups, group policy, share folders, LAPS 
 
 ## Run
 
-```bash
-export DOTNET_ROOT=/usr/share/dotnet
-export PATH="$DOTNET_ROOT:$PATH"
+`start.sh` installs missing prerequisites (Node.js 20, .NET 8 SDK, ICU when running as root) then starts both services.
 
-# From repo root, start API (port 3001) and UI (port 5173)
+```bash
+chmod +x start.sh
 ./start.sh
 ```
 
-Frontend: http://localhost:5173  
+Frontend: http://localhost:5173
 API: http://localhost:3001
 
 ## Microsoft AD stack
