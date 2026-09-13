@@ -12,19 +12,48 @@ builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
 });
 builder.Services.AddCors(o => o.AddDefaultPolicy(p => p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+builder.Services.AddSingleton<AppLog>();
 builder.Services.AddSingleton<DirectoryStore>();
 builder.Services.AddSingleton<ActiveDirectoryClient>();
 builder.Services.AddSingleton<AzureAdClient>();
 
 var app = builder.Build();
-app.UseCors();
-app.MapFeatures();
+var log = app.Services.GetRequiredService<AppLog>();
 app.UseExceptionHandler(err => err.Run(async ctx =>
 {
     var ex = ctx.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
+    log.Write("error", "http", $"Unhandled {ctx.Request.Method} {ctx.Request.Path}", ex: ex);
     ctx.Response.StatusCode = 400;
     await ctx.Response.WriteAsJsonAsync(new { message = ex?.Message ?? "Error" });
 }));
+app.Use(async (ctx, next) =>
+{
+    var started = DateTimeOffset.UtcNow;
+    ctx.Request.EnableBuffering();
+    string? body = null;
+    if (ctx.Request.ContentLength is > 0 and < 32_000 &&
+        ctx.Request.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true)
+    {
+        using var reader = new StreamReader(ctx.Request.Body, leaveOpen: true);
+        body = await reader.ReadToEndAsync();
+        ctx.Request.Body.Position = 0;
+    }
+    try
+    {
+        await next();
+    }
+    catch (Exception ex)
+    {
+        log.Write("error", "http", $"{ctx.Request.Method} {ctx.Request.Path} failed", body, ex);
+        throw;
+    }
+    var ms = (DateTimeOffset.UtcNow - started).TotalMilliseconds;
+    var level = ctx.Response.StatusCode >= 500 ? "error" : ctx.Response.StatusCode >= 400 ? "warn" : "debug";
+    log.Write(level, "http", $"{ctx.Request.Method} {ctx.Request.Path} -> {ctx.Response.StatusCode} ({ms:0}ms)",
+        string.IsNullOrWhiteSpace(body) ? null : body);
+});
+app.UseCors();
+app.MapFeatures();
 
 object Page<T>(IEnumerable<T> source, string? q, string? type, int page, int pageSize, Func<T, string>? typeOf = null)
 {
@@ -119,22 +148,16 @@ app.MapGet("/api/settings", (DirectoryStore store) =>
     });
 });
 
-app.MapPut("/api/settings/domain-controller", (DomainControllerSettings body, DirectoryStore store) =>
+app.MapPut("/api/settings/domain-controller", (DomainControllerSettings body, DirectoryStore store, AppLog appLog) =>
 {
     var dc = store.Update(s =>
     {
         var cur = s.Settings.DomainController;
-        cur.Host = body.Host ?? cur.Host;
-        if (body.Port != 0) cur.Port = body.Port;
-        cur.UseSsl = body.UseSsl;
-        cur.BindDn = body.BindDn ?? cur.BindDn;
-        if (!string.IsNullOrEmpty(body.Password) && body.Password != "********")
-            cur.Password = body.Password;
-        cur.BaseDn = body.BaseDn ?? cur.BaseDn;
-        cur.Domain = body.Domain ?? cur.Domain;
+        DirectoryConnection.Apply(cur, body);
         DirectoryStore.AddAudit(s, "update", "settings", "domain-controller", "Updated domain controller connection settings");
         return cur;
     });
+    appLog.Write("info", "settings", "Saved domain controller settings", DirectoryConnection.Describe(dc));
     return Results.Json(new
     {
         dc.Host, dc.Port, dc.UseSsl, dc.BindDn, password = Mask(dc.Password),
@@ -161,12 +184,18 @@ app.MapPut("/api/settings/azure-ad", (AzureAdSettings body, DirectoryStore store
     });
 });
 
-app.MapPost("/api/settings/domain-controller/test", async (DirectoryStore store, ActiveDirectoryClient ad) =>
+app.MapPost("/api/settings/domain-controller/test", async (DomainControllerSettings? body, DirectoryStore store, ActiveDirectoryClient ad, AppLog appLog) =>
 {
-    var s = store.Snapshot();
+    var dc = store.Update(s =>
+    {
+        if (body != null) DirectoryConnection.Apply(s.Settings.DomainController, body);
+        else DirectoryConnection.Normalize(s.Settings.DomainController);
+        return s.Settings.DomainController;
+    });
+    appLog.Write("info", "ldap", "Testing domain controller bind", DirectoryConnection.Describe(dc));
     try
     {
-        await ad.TestConnectionAsync(s.Settings.DomainController);
+        await ad.TestConnectionAsync(dc);
         store.Update(st =>
         {
             st.Settings.DomainController.Connected = true;
@@ -175,10 +204,12 @@ app.MapPost("/api/settings/domain-controller/test", async (DirectoryStore store,
             DirectoryStore.AddAudit(st, "connect", "settings", "domain-controller", $"Bound to {st.Settings.DomainController.Host} via System.DirectoryServices.Protocols");
         });
         var last = store.Snapshot().Settings.DomainController.LastTest;
-        return Results.Json(new { ok = true, message = $"Bound to {s.Settings.DomainController.Host} using LDAP (DirectoryServices.Protocols)", lastTest = last });
+        appLog.Write("info", "ldap", $"LDAP bind succeeded to {dc.Host}:{dc.Port}");
+        return Results.Json(new { ok = true, message = $"Bound to {dc.Host} using LDAP (DirectoryServices.Protocols)", lastTest = last, host = dc.Host, bindDn = dc.BindDn, baseDn = dc.BaseDn, domain = dc.Domain });
     }
     catch (Exception ex)
     {
+        appLog.Write("error", "ldap", $"LDAP bind failed to {dc.Host}:{dc.Port} as {dc.BindDn}", DirectoryConnection.Describe(dc), ex);
         store.Update(st =>
         {
             st.Settings.DomainController.Connected = false;
@@ -186,13 +217,37 @@ app.MapPost("/api/settings/domain-controller/test", async (DirectoryStore store,
             st.Settings.DomainController.LastError = ex.Message;
             DirectoryStore.AddAudit(st, "connect", "settings", "domain-controller", ex.Message, "failure");
         });
-        return Results.Json(new { ok = false, message = ex.Message, lastTest = DateTimeOffset.UtcNow }, statusCode: 400);
+        return Results.Json(new { ok = false, message = ex.Message, lastTest = DateTimeOffset.UtcNow, host = dc.Host, bindDn = dc.BindDn, baseDn = dc.BaseDn, domain = dc.Domain }, statusCode: 400);
     }
 });
 
-app.MapPost("/api/settings/azure-ad/test", async (DirectoryStore store, AzureAdClient azure) =>
+app.MapGet("/api/logs", (AppLog appLog, string? q, string? level, int take = 200) =>
 {
+    var items = appLog.Query(q, level, take);
+    return Results.Json(new { items, total = items.Count, file = appLog.FilePath });
+});
+
+app.MapGet("/api/logs/file", (AppLog appLog) =>
+{
+    if (!File.Exists(appLog.FilePath)) return Results.Text("", "text/plain");
+    return Results.Text(File.ReadAllText(appLog.FilePath), "text/plain");
+});
+
+app.MapPost("/api/settings/azure-ad/test", async (AzureAdSettings? body, DirectoryStore store, AzureAdClient azure, AppLog appLog) =>
+{
+    if (body != null)
+    {
+        store.Update(st =>
+        {
+            var cur = st.Settings.AzureAd;
+            if (!string.IsNullOrWhiteSpace(body.TenantId)) cur.TenantId = body.TenantId.Trim();
+            if (!string.IsNullOrWhiteSpace(body.ClientId)) cur.ClientId = body.ClientId.Trim();
+            if (!string.IsNullOrEmpty(body.ClientSecret) && body.ClientSecret != "********")
+                cur.ClientSecret = body.ClientSecret;
+        });
+    }
     var s = store.Snapshot();
+    appLog.Write("info", "azure", "Testing Azure AD client credentials", new { s.Settings.AzureAd.TenantId, s.Settings.AzureAd.ClientId });
     try
     {
         await azure.TestConnectionAsync(s.Settings.AzureAd);
@@ -203,10 +258,12 @@ app.MapPost("/api/settings/azure-ad/test", async (DirectoryStore store, AzureAdC
             st.Settings.AzureAd.LastError = null;
             DirectoryStore.AddAudit(st, "connect", "settings", "azure-ad", "Azure AD application credentials accepted (MSAL client credentials)");
         });
+        appLog.Write("info", "azure", "Azure AD token acquired");
         return Results.Json(new { ok = true, message = "Azure AD application credentials accepted via Microsoft.Identity.Client", lastTest = DateTimeOffset.UtcNow });
     }
     catch (Exception ex)
     {
+        appLog.Write("error", "azure", "Azure AD test failed", new { s.Settings.AzureAd.TenantId, s.Settings.AzureAd.ClientId }, ex);
         store.Update(st =>
         {
             st.Settings.AzureAd.Connected = false;

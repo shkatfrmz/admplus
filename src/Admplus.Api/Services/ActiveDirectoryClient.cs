@@ -8,6 +8,13 @@ namespace Admplus.Api.Services;
 
 public class ActiveDirectoryClient
 {
+    private readonly AppLog _log;
+
+    public ActiveDirectoryClient(AppLog log)
+    {
+        _log = log;
+    }
+
     public const int AdsUfAccountDisable = 0x2;
     public const int AdsUfLockout = 0x10;
     public const int AdsUfPasswdCantChange = 0x40;
@@ -22,17 +29,30 @@ public class ActiveDirectoryClient
 
     public Task TestConnectionAsync(DomainControllerSettings dc, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(dc.Host) || string.IsNullOrWhiteSpace(dc.BindDn))
-            throw new InvalidOperationException("Host and bind DN are required");
-
-        using var connection = Bind(dc);
-        if (!string.IsNullOrWhiteSpace(dc.BaseDn))
+        DirectoryConnection.Normalize(dc);
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(dc.Host)) missing.Add("host");
+        if (string.IsNullOrWhiteSpace(dc.BindDn)) missing.Add("bind DN (or user@domain)");
+        if (string.IsNullOrWhiteSpace(dc.Password)) missing.Add("password");
+        if (missing.Count > 0)
         {
-            var request = new SearchRequest(dc.BaseDn, "(objectClass=*)", SearchScope.Base, "distinguishedName")
+            var msg = $"Cannot bind: missing {string.Join(", ", missing)}. Fill Host (or Domain), Bind DN, and Password, then Save or Test.";
+            _log.Write("warn", "ldap", msg, DirectoryConnection.Describe(dc));
+            throw new InvalidOperationException(msg);
+        }
+
+        _log.Write("info", "ldap", $"Binding to {dc.Host}:{dc.Port} ssl={dc.UseSsl} as {dc.BindDn}");
+        using var connection = Bind(dc);
+        _log.Write("info", "ldap", "Bind succeeded");
+        var probeDn = string.IsNullOrWhiteSpace(dc.BaseDn) ? ResolveBase(dc) : dc.BaseDn;
+        if (!string.IsNullOrWhiteSpace(probeDn))
+        {
+            var request = new SearchRequest(probeDn, "(objectClass=*)", SearchScope.Base, "distinguishedName")
             {
                 SizeLimit = 1
             };
             connection.SendRequest(request);
+            _log.Write("info", "ldap", $"Base DN probe ok: {probeDn}");
         }
         return Task.CompletedTask;
     }
@@ -221,10 +241,27 @@ public class ActiveDirectoryClient
         return Attr(entry, "msLAPS-Password", Attr(entry, "ms-Mcs-AdmPwd"));
     }
 
-    private static LdapConnection Bind(DomainControllerSettings dc)
+    private LdapConnection Bind(DomainControllerSettings dc)
     {
-        var identifier = new LdapDirectoryIdentifier(dc.Host, dc.Port <= 0 ? (dc.UseSsl ? 636 : 389) : dc.Port, false, false);
-        var credential = new NetworkCredential(dc.BindDn, dc.Password ?? "");
+        DirectoryConnection.Normalize(dc);
+        var port = dc.Port <= 0 ? (dc.UseSsl ? 636 : 389) : dc.Port;
+        var identifier = new LdapDirectoryIdentifier(dc.Host, port, false, false);
+        var user = dc.BindDn;
+        var domain = dc.Domain;
+        NetworkCredential credential;
+        if (user.Contains('\\') && user.Split('\\').Length == 2)
+        {
+            var parts = user.Split('\\', 2);
+            credential = new NetworkCredential(parts[1], dc.Password ?? "", parts[0]);
+        }
+        else if (user.Contains('@'))
+        {
+            credential = new NetworkCredential(user, dc.Password ?? "");
+        }
+        else
+        {
+            credential = new NetworkCredential(user, dc.Password ?? "", domain);
+        }
         var connection = new LdapConnection(identifier, credential, AuthType.Basic)
         {
             Timeout = TimeSpan.FromSeconds(12)
@@ -233,7 +270,20 @@ public class ActiveDirectoryClient
         connection.SessionOptions.SecureSocketLayer = dc.UseSsl;
         if (dc.UseSsl)
             connection.SessionOptions.VerifyServerCertificate += (_, _) => true;
-        connection.Bind();
+        try
+        {
+            connection.Bind();
+        }
+        catch (LdapException ex)
+        {
+            _log.Write("error", "ldap", $"LdapException resultCode={ex.ErrorCode} server={ex.ServerErrorMessage}", DirectoryConnection.Describe(dc), ex);
+            throw new InvalidOperationException($"LDAP bind to {dc.Host}:{port} as {dc.BindDn} failed: {ex.Message} (code {ex.ErrorCode}{(string.IsNullOrEmpty(ex.ServerErrorMessage) ? "" : $", {ex.ServerErrorMessage}")})", ex);
+        }
+        catch (Exception ex)
+        {
+            _log.Write("error", "ldap", $"Bind threw {ex.GetType().Name}", DirectoryConnection.Describe(dc), ex);
+            throw;
+        }
         return connection;
     }
 

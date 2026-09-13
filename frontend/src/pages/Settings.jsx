@@ -21,11 +21,30 @@ export default function Settings() {
 
   function msg(text, k = 'ok') { setFlash(text); setKind(k) }
 
+  function normalizeDc(next = dc) {
+    const payload = { ...next, host: (next.host || '').trim(), domain: (next.domain || '').trim(), baseDn: (next.baseDn || '').trim(), bindDn: (next.bindDn || '').trim() }
+    if (!payload.host && payload.domain) payload.host = payload.domain
+    if (!payload.baseDn && payload.domain)
+      payload.baseDn = payload.domain.split('.').filter(Boolean).map((p) => `DC=${p}`).join(',')
+    if (!payload.domain && payload.baseDn)
+      payload.domain = payload.baseDn.split(',').filter((p) => /^DC=/i.test(p.trim())).map((p) => p.trim().slice(3)).join('.')
+    return payload
+  }
+
+  async function persistDc(next = dc) {
+    const payload = normalizeDc(next)
+    const saved = await api.saveDc(payload)
+    const merged = { ...payload, ...saved }
+    if ((merged.password === '********' || !merged.password) && payload.password && payload.password !== '********')
+      merged.password = payload.password
+    setDc(merged)
+    return merged
+  }
+
   async function saveDc(e) {
     e.preventDefault()
     try {
-      const saved = await api.saveDc(dc)
-      setDc((d) => ({ ...d, ...saved }))
+      await persistDc()
       msg('Domain controller settings saved')
     } catch (err) { msg(err.message, 'err') }
   }
@@ -42,11 +61,30 @@ export default function Settings() {
   async function testDc() {
     setBusy('dc')
     try {
-      const r = await api.testDc()
-      setDc((d) => ({ ...d, connected: true, lastTest: r.lastTest, lastError: null }))
+      const current = await persistDc()
+      const r = await api.testDc(current)
+      setDc((d) => ({
+        ...d,
+        connected: true,
+        lastTest: r.lastTest,
+        lastError: null,
+        host: r.host || d.host,
+        bindDn: r.bindDn || d.bindDn,
+        baseDn: r.baseDn || d.baseDn,
+        domain: r.domain || d.domain
+      }))
       msg(r.message)
     } catch (err) {
-      setDc((d) => ({ ...d, connected: false, lastError: err.message }))
+      const extra = err.data || {}
+      setDc((d) => ({
+        ...d,
+        connected: false,
+        lastError: err.message,
+        host: extra.host || d.host,
+        bindDn: extra.bindDn || d.bindDn,
+        baseDn: extra.baseDn || d.baseDn,
+        domain: extra.domain || d.domain
+      }))
       msg(err.message, 'err')
     } finally { setBusy('') }
   }
@@ -54,7 +92,9 @@ export default function Settings() {
   async function testAz() {
     setBusy('az')
     try {
-      const r = await api.testAzure()
+      const saved = await api.saveAzure(az)
+      setAz((a) => ({ ...a, ...saved }))
+      const r = await api.testAzure(az)
       setAz((a) => ({ ...a, connected: true, lastTest: r.lastTest, lastError: null }))
       msg(r.message)
     } catch (err) {
@@ -86,14 +126,15 @@ export default function Settings() {
           </p>
           {dc.lastError ? <p className="flash err">{dc.lastError}</p> : null}
           <div className="form-grid">
-            <Field label="Host / FQDN"><input value={dc.host} onChange={(e) => setDc({ ...dc, host: e.target.value })} placeholder="dc01.contoso.local" /></Field>
+            <Field label="Host / FQDN"><input value={dc.host} onChange={(e) => setDc({ ...dc, host: e.target.value })} placeholder="dc01.labnet.local or labnet.local" /></Field>
             <Field label="Port"><input type="number" value={dc.port} onChange={(e) => setDc({ ...dc, port: Number(e.target.value) })} /></Field>
-            <Field label="Domain"><input value={dc.domain} onChange={(e) => setDc({ ...dc, domain: e.target.value })} placeholder="contoso.local" /></Field>
-            <Field label="Base DN"><input value={dc.baseDn} onChange={(e) => setDc({ ...dc, baseDn: e.target.value })} placeholder="DC=contoso,DC=local" /></Field>
-            <Field label="Bind DN" full><input value={dc.bindDn} onChange={(e) => setDc({ ...dc, bindDn: e.target.value })} placeholder="CN=Administrator,CN=Users,DC=contoso,DC=local" /></Field>
+            <Field label="Domain"><input value={dc.domain} onChange={(e) => setDc({ ...dc, domain: e.target.value })} placeholder="labnet.local" /></Field>
+            <Field label="Base DN"><input value={dc.baseDn} onChange={(e) => setDc({ ...dc, baseDn: e.target.value })} placeholder="DC=labnet,DC=local" /></Field>
+            <Field label="Bind DN / UPN" full><input value={dc.bindDn} onChange={(e) => setDc({ ...dc, bindDn: e.target.value })} placeholder="CN=Administrator,CN=Users,DC=labnet,DC=local or Administrator@labnet.local" /></Field>
             <Field label="Password" full><input type="password" value={dc.password} onChange={(e) => setDc({ ...dc, password: e.target.value })} placeholder="Bind password" /></Field>
             <label className="check"><input type="checkbox" checked={Boolean(dc.useSsl)} onChange={(e) => setDc({ ...dc, useSsl: e.target.checked, port: e.target.checked ? 636 : 389 })} /> Use LDAPS</label>
           </div>
+          <p className="muted">Host can be a DC FQDN or the DNS domain. Bind DN can be a distinguished name, UPN, or SAM. Test saves the form first. Failures are written to Logs.</p>
           <div className="actions" style={{ marginTop: 14 }}>
             <button className="btn primary" type="submit">Save</button>
             <button className="btn" type="button" disabled={busy === 'dc'} onClick={testDc}>{busy === 'dc' ? 'Testing...' : 'Test connection'}</button>

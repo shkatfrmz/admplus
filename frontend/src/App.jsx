@@ -12,6 +12,7 @@ import Laps from './pages/Laps.jsx'
 import Audit from './pages/Audit.jsx'
 import Reports from './pages/Reports.jsx'
 import Settings from './pages/Settings.jsx'
+import Logs from './pages/Logs.jsx'
 import OuBrowser from './pages/OuBrowser.jsx'
 import Hybrid from './pages/Hybrid.jsx'
 import JitAdmin from './pages/JitAdmin.jsx'
@@ -43,6 +44,7 @@ const featureLinks = [
   { to: '/security', label: 'Security health', ico: 'shield' },
   { to: '/operators', label: 'Operators', ico: 'users' },
   { to: '/audit', label: 'Auditing', ico: 'audit' },
+  { to: '/logs', label: 'Logs', ico: 'audit' },
   { to: '/reports', label: 'Reports', ico: 'reports' }
 ]
 
@@ -156,6 +158,7 @@ export default function App() {
             <Route path="/security" element={<SecurityHealth />} />
             <Route path="/operators" element={<Operators />} />
             <Route path="/audit" element={<Audit />} />
+            <Route path="/logs" element={<Logs />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>

@@ -20,8 +20,8 @@ export const api = {
   settings: () => request('/api/settings'),
   saveDc: (body) => request('/api/settings/domain-controller', { method: 'PUT', body }),
   saveAzure: (body) => request('/api/settings/azure-ad', { method: 'PUT', body }),
-  testDc: () => request('/api/settings/domain-controller/test', { method: 'POST', body: {} }),
-  testAzure: () => request('/api/settings/azure-ad/test', { method: 'POST', body: {} }),
+  testDc: (body) => request('/api/settings/domain-controller/test', { method: 'POST', body: body || {} }),
+  testAzure: (body) => request('/api/settings/azure-ad/test', { method: 'POST', body: body || {} }),
   sync: () => request('/api/settings/sync', { method: 'POST', body: {} }),
   users: (q) => request(`/api/users${q || ''}`),
   user: (id) => request(`/api/users/${id}`),
@@ -96,5 +96,7 @@ export const api = {
   updateOperator: (id, body) => request(`/api/operators/${id}`, { method: 'PUT', body }),
   assumeOperator: (id) => request(`/api/operators/assume/${id}`, { method: 'POST', body: {} }),
   lapsGrants: () => request('/api/laps-grants'),
-  createLapsGrant: (body) => request('/api/laps-grants', { method: 'POST', body })
+  createLapsGrant: (body) => request('/api/laps-grants', { method: 'POST', body }),
+  logs: (q) => request(`/api/logs${q || ''}`),
+  logsFile: () => fetch('/api/logs/file').then((r) => r.text())
 }
