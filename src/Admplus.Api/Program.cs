@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Admplus.Api;
@@ -34,7 +35,7 @@ app.Use(async (ctx, next) =>
     if (ctx.Request.ContentLength is > 0 and < 32_000 &&
         ctx.Request.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true)
     {
-        using var reader = new StreamReader(ctx.Request.Body, leaveOpen: true);
+        using var reader = new StreamReader(ctx.Request.Body, Encoding.UTF8, false, 1024, true);
         body = await reader.ReadToEndAsync();
         ctx.Request.Body.Position = 0;
     }
@@ -188,8 +189,10 @@ app.MapPost("/api/settings/domain-controller/test", async (DomainControllerSetti
 {
     var dc = store.Update(s =>
     {
-        if (body != null) DirectoryConnection.Apply(s.Settings.DomainController, body);
-        else DirectoryConnection.Normalize(s.Settings.DomainController);
+        if (DirectoryConnection.HasConnectionFields(body))
+            DirectoryConnection.Apply(s.Settings.DomainController, body!);
+        else
+            DirectoryConnection.Normalize(s.Settings.DomainController);
         return s.Settings.DomainController;
     });
     appLog.Write("info", "ldap", "Testing domain controller bind", DirectoryConnection.Describe(dc));

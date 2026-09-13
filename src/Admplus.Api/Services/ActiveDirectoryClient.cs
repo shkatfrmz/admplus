@@ -33,7 +33,7 @@ public class ActiveDirectoryClient
         var missing = new List<string>();
         if (string.IsNullOrWhiteSpace(dc.Host)) missing.Add("host");
         if (string.IsNullOrWhiteSpace(dc.BindDn)) missing.Add("bind DN (or user@domain)");
-        if (string.IsNullOrWhiteSpace(dc.Password)) missing.Add("password");
+        if (string.IsNullOrWhiteSpace(dc.Password) || dc.Password == "********") missing.Add("password");
         if (missing.Count > 0)
         {
             var msg = $"Cannot bind: missing {string.Join(", ", missing)}. Fill Host (or Domain), Bind DN, and Password, then Save or Test.";
@@ -246,45 +246,133 @@ public class ActiveDirectoryClient
         DirectoryConnection.Normalize(dc);
         var port = dc.Port <= 0 ? (dc.UseSsl ? 636 : 389) : dc.Port;
         var identifier = new LdapDirectoryIdentifier(dc.Host, port, false, false);
+        var attempts = BindAttempts(dc);
+        Exception? last = null;
+        foreach (var attempt in attempts)
+        {
+            var connection = new LdapConnection(identifier)
+            {
+                Timeout = TimeSpan.FromSeconds(12),
+                AuthType = attempt.Auth
+            };
+            connection.SessionOptions.ProtocolVersion = 3;
+            connection.SessionOptions.SecureSocketLayer = dc.UseSsl;
+            if (dc.UseSsl)
+                connection.SessionOptions.VerifyServerCertificate += (_, _) => true;
+            try
+            {
+                _log.Write("info", "ldap", $"Bind attempt auth={attempt.Auth} user={attempt.User} domain={attempt.Domain ?? ""}");
+                connection.Credential = new NetworkCredential(attempt.User, dc.Password ?? "", attempt.Domain ?? "");
+                connection.Bind();
+                _log.Write("info", "ldap", $"Bind ok with auth={attempt.Auth} user={attempt.User}");
+                return connection;
+            }
+            catch (LdapException ex)
+            {
+                last = ex;
+                _log.Write("warn", "ldap", $"Bind attempt failed auth={attempt.Auth} user={attempt.User} code={ex.ErrorCode} server={ex.ServerErrorMessage}", null, ex);
+                connection.Dispose();
+            }
+            catch (Exception ex)
+            {
+                last = ex;
+                _log.Write("warn", "ldap", $"Bind attempt threw {ex.GetType().Name} auth={attempt.Auth} user={attempt.User}", null, ex);
+                connection.Dispose();
+            }
+        }
+
+        var ldap = last as LdapException;
+        var hint = ExplainLdap(ldap);
+        var detail = ldap is null
+            ? last?.Message ?? "bind failed"
+            : $"{ldap.Message} (code {ldap.ErrorCode}{(string.IsNullOrEmpty(ldap.ServerErrorMessage) ? "" : $", {ldap.ServerErrorMessage}")})";
+        _log.Write("error", "ldap", $"All bind attempts failed to {dc.Host}:{port} as {dc.BindDn}", DirectoryConnection.Describe(dc), last);
+        throw new InvalidOperationException($"LDAP bind to {dc.Host}:{port} as {dc.BindDn} failed: {detail}.{hint}", last);
+    }
+
+    private static List<(AuthType Auth, string User, string? Domain)> BindAttempts(DomainControllerSettings dc)
+    {
         var user = dc.BindDn;
-        var domain = dc.Domain;
-        NetworkCredential credential;
-        if (user.Contains('\\') && user.Split('\\').Length == 2)
+        var domainNetbios = Netbios(dc.Domain);
+        var attempts = new List<(AuthType, string, string?)>();
+
+        void add(AuthType auth, string name, string? domain)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return;
+            if (attempts.Any(a => a.Item1 == auth && a.Item2 == name && a.Item3 == domain)) return;
+            attempts.Add((auth, name, domain));
+        }
+
+        if (user.Contains('=', StringComparison.Ordinal))
+        {
+            add(AuthType.Basic, user, "");
+            var cn = CnFromDn(user);
+            if (!string.IsNullOrEmpty(cn) && !string.IsNullOrEmpty(domainNetbios))
+            {
+                add(AuthType.Basic, $"{domainNetbios}\\{cn}", "");
+                add(AuthType.Negotiate, cn, domainNetbios);
+            }
+            if (!string.IsNullOrEmpty(cn) && !string.IsNullOrWhiteSpace(dc.Domain))
+                add(AuthType.Basic, $"{cn}@{dc.Domain}", "");
+        }
+        else if (user.Contains('\\') && user.Split('\\').Length == 2)
         {
             var parts = user.Split('\\', 2);
-            credential = new NetworkCredential(parts[1], dc.Password ?? "", parts[0]);
+            add(AuthType.Basic, user, "");
+            add(AuthType.Negotiate, parts[1], parts[0]);
         }
         else if (user.Contains('@'))
         {
-            credential = new NetworkCredential(user, dc.Password ?? "");
+            add(AuthType.Basic, user, "");
+            add(AuthType.Negotiate, user, "");
         }
         else
         {
-            credential = new NetworkCredential(user, dc.Password ?? "", domain);
+            if (!string.IsNullOrEmpty(domainNetbios))
+            {
+                add(AuthType.Basic, $"{domainNetbios}\\{user}", "");
+                add(AuthType.Negotiate, user, domainNetbios);
+            }
+            if (!string.IsNullOrWhiteSpace(dc.Domain))
+                add(AuthType.Basic, $"{user}@{dc.Domain}", "");
+            add(AuthType.Basic, user, "");
         }
-        var connection = new LdapConnection(identifier, credential, AuthType.Basic)
-        {
-            Timeout = TimeSpan.FromSeconds(12)
-        };
-        connection.SessionOptions.ProtocolVersion = 3;
-        connection.SessionOptions.SecureSocketLayer = dc.UseSsl;
-        if (dc.UseSsl)
-            connection.SessionOptions.VerifyServerCertificate += (_, _) => true;
-        try
-        {
-            connection.Bind();
-        }
-        catch (LdapException ex)
-        {
-            _log.Write("error", "ldap", $"LdapException resultCode={ex.ErrorCode} server={ex.ServerErrorMessage}", DirectoryConnection.Describe(dc), ex);
-            throw new InvalidOperationException($"LDAP bind to {dc.Host}:{port} as {dc.BindDn} failed: {ex.Message} (code {ex.ErrorCode}{(string.IsNullOrEmpty(ex.ServerErrorMessage) ? "" : $", {ex.ServerErrorMessage}")})", ex);
-        }
-        catch (Exception ex)
-        {
-            _log.Write("error", "ldap", $"Bind threw {ex.GetType().Name}", DirectoryConnection.Describe(dc), ex);
-            throw;
-        }
-        return connection;
+
+        return attempts;
+    }
+
+    private static string ExplainLdap(LdapException? ex)
+    {
+        var server = ex?.ServerErrorMessage ?? "";
+        if (server.Contains("data 52e", StringComparison.OrdinalIgnoreCase) || server.Contains("data 52E", StringComparison.OrdinalIgnoreCase))
+            return " AD data 52e = username/password rejected. Re-type the real bind password (do not leave the masked ********). Bind DN can be CN=..., user@domain, or DOMAIN\\sam.";
+        if (server.Contains("data 532", StringComparison.OrdinalIgnoreCase))
+            return " AD data 532 = password expired.";
+        if (server.Contains("data 533", StringComparison.OrdinalIgnoreCase))
+            return " AD data 533 = account disabled.";
+        if (server.Contains("data 701", StringComparison.OrdinalIgnoreCase))
+            return " AD data 701 = account expired.";
+        if (server.Contains("data 775", StringComparison.OrdinalIgnoreCase))
+            return " AD data 775 = account locked.";
+        if (server.Contains("data 525", StringComparison.OrdinalIgnoreCase))
+            return " AD data 525 = user not found.";
+        if (ex?.ErrorCode == 81)
+            return " LDAP 81 = DC unreachable from this machine (DNS/firewall/port 389).";
+        return "";
+    }
+
+    private static string CnFromDn(string dn)
+    {
+        var first = dn.Split(',')[0];
+        var idx = first.IndexOf('=');
+        return idx >= 0 ? first[(idx + 1)..].Trim() : "";
+    }
+
+    private static string Netbios(string domain)
+    {
+        if (string.IsNullOrWhiteSpace(domain)) return "";
+        var i = domain.IndexOf('.');
+        return (i > 0 ? domain[..i] : domain).ToUpperInvariant();
     }
 
     private static void SetPassword(LdapConnection connection, string dn, string password)
