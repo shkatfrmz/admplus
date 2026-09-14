@@ -403,6 +403,17 @@ app.MapPost("/api/settings/sync", (DirectoryStore store, ActiveDirectoryClient a
                 }
             }
 
+            var ouByDn = st.Ous
+                .GroupBy(x => x.Dn, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            foreach (var o in liveOus)
+            {
+                if (!ouByDn.TryGetValue(o.Dn, out var node)) continue;
+                var parentDn = ActiveDirectoryClient.ParentDnOf(o.Dn);
+                node.ParentId = parentDn.Length > 0 && ouByDn.TryGetValue(parentDn, out var parent) ? parent.Id : "";
+            }
+            appLog.Write("info", "sync", $"OU tree: {st.Ous.Count} nodes, {st.Ous.Count(x => !string.IsNullOrEmpty(x.ParentId))} nested (have a parent), {st.Ous.Count(x => string.IsNullOrEmpty(x.ParentId))} at root");
+
             foreach (var p in liveGpos)
             {
                 var existing = st.Gpos.FirstOrDefault(x => x.Id.Equals(p.Id, StringComparison.OrdinalIgnoreCase));

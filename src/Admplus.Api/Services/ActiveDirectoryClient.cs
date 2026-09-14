@@ -164,7 +164,7 @@ public class ActiveDirectoryClient
             Office = Attr(entry, "physicalDeliveryOfficeName"),
             Phone = Attr(entry, "telephoneNumber"),
             Manager = Attr(entry, "manager"),
-            Ou = Attr(entry, "distinguishedName"),
+            Ou = ParentDnOf(Attr(entry, "distinguishedName")),
             Source = "ad-live",
             Created = ParseGeneralized(Attr(entry, "whenCreated")),
             LastLogon = ParseFileTime(Attr(entry, "lastLogonTimestamp"))
@@ -201,7 +201,7 @@ public class ActiveDirectoryClient
                 OsVersion = Attr(entry, "operatingSystemVersion"),
                 Type = type,
                 Enabled = (uac & AdsUfAccountDisable) == 0,
-                Ou = Attr(entry, "distinguishedName"),
+                Ou = ParentDnOf(Attr(entry, "distinguishedName")),
                 Description = Attr(entry, "description"),
                 ManagedBy = Attr(entry, "managedBy"),
                 ServicePrincipalNames = Attrs(entry, "servicePrincipalName").ToList(),
@@ -238,7 +238,7 @@ public class ActiveDirectoryClient
                 Type = security ? "security" : "distribution",
                 Scope = scope,
                 Description = Attr(entry, "description"),
-                Ou = Attr(entry, "distinguishedName"),
+                Ou = ParentDnOf(Attr(entry, "distinguishedName")),
                 Mail = Attr(entry, "mail"),
                 Members = Attrs(entry, "member").ToList(),
                 Created = ParseGeneralized(Attr(entry, "whenCreated")),
@@ -252,26 +252,34 @@ public class ActiveDirectoryClient
     public List<OrganizationalUnit> SearchOus(DomainControllerSettings dc)
     {
         var baseDn = ResolveBase(dc);
-        var entries = Search(dc, baseDn, "(objectClass=organizationalUnit)", SearchScope.Subtree,
-            "ou", "name", "distinguishedName", "description", "whenCreated");
+        var results = new List<OrganizationalUnit>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        var ous = new List<OrganizationalUnit>();
-        foreach (var entry in entries)
+        void Add(SearchResultEntry entry)
         {
             var dn = Attr(entry, "distinguishedName");
-            if (string.IsNullOrEmpty(dn)) continue;
-            ous.Add(new OrganizationalUnit
+            if (string.IsNullOrEmpty(dn) || !seen.Add(dn)) return;
+            results.Add(new OrganizationalUnit
             {
                 Id = "ou-ad-" + Guid.NewGuid().ToString("n")[..8],
-                Name = Attr(entry, "ou", Attr(entry, "name")),
+                Name = Attr(entry, "ou", Attr(entry, "name", Attr(entry, "cn"))),
                 Dn = dn,
                 Description = Attr(entry, "description"),
                 Created = ParseGeneralized(Attr(entry, "whenCreated")),
                 Source = "ad-live"
             });
         }
-        _log.Write("info", "ldap", $"SearchOus returned {ous.Count} OUs");
-        return ous;
+
+        var ous = Search(dc, baseDn, "(objectClass=organizationalUnit)", SearchScope.Subtree,
+            "ou", "name", "distinguishedName", "description", "whenCreated");
+        foreach (var entry in ous) Add(entry);
+
+        var containers = Search(dc, baseDn, "(objectClass=container)", SearchScope.OneLevel,
+            "cn", "name", "distinguishedName", "description", "whenCreated");
+        foreach (var entry in containers) Add(entry);
+
+        _log.Write("info", "ldap", $"SearchOus returned {ous.Count} OUs + {results.Count - ous.Count} top-level containers");
+        return results;
     }
 
     public List<DirectoryGpo> SearchGpos(DomainControllerSettings dc)
@@ -668,6 +676,20 @@ public class ActiveDirectoryClient
     {
         var idx = dn.IndexOf(',');
         return idx > 0 && dn.StartsWith("CN=", StringComparison.OrdinalIgnoreCase) ? dn[(idx + 1)..] : dn;
+    }
+
+    public static string ParentDnOf(string dn)
+    {
+        if (string.IsNullOrEmpty(dn)) return "";
+        var escaped = false;
+        for (var i = 0; i < dn.Length; i++)
+        {
+            var c = dn[i];
+            if (escaped) { escaped = false; continue; }
+            if (c == '\\') { escaped = true; continue; }
+            if (c == ',') return dn[(i + 1)..].Trim();
+        }
+        return "";
     }
 
     private static string EscapeCn(string name) => name.Replace(",", "\\,");
