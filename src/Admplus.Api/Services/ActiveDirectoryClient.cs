@@ -94,51 +94,89 @@ public class ActiveDirectoryClient
         var users = new List<DirectoryUser>();
         foreach (var entry in entries)
         {
-            var sam = Attr(entry, "sAMAccountName");
-            if (string.IsNullOrEmpty(sam)) continue;
-            var uac = ParseInt(Attr(entry, "userAccountControl"));
-            var classes = Attrs(entry, "objectClass").Select(c => c.ToLowerInvariant()).ToHashSet();
-            var type = "user";
-            if (classes.Contains("msds-groupmanagedserviceaccount") || classes.Contains("msds-managedserviceaccount"))
-                type = "managedService";
-            else if (classes.Contains("inetorgperson") && !classes.Contains("user"))
-                type = "inetOrgPerson";
-            else if (classes.Contains("contact"))
-                type = "contact";
-
-            users.Add(new DirectoryUser
-            {
-                SamAccountName = sam,
-                DisplayName = Attr(entry, "displayName", sam),
-                GivenName = Attr(entry, "givenName"),
-                Surname = Attr(entry, "sn"),
-                UserPrincipalName = Attr(entry, "userPrincipalName"),
-                Email = Attr(entry, "mail"),
-                Type = type,
-                Enabled = (uac & AdsUfAccountDisable) == 0,
-                Locked = (uac & AdsUfLockout) != 0 || Attr(entry, "lockoutTime") is { Length: > 0 } and not "0",
-                PasswordNeverExpires = (uac & AdsUfDontExpirePasswd) != 0,
-                CannotChangePassword = (uac & AdsUfPasswdCantChange) != 0,
-                MustChangePassword = Attr(entry, "pwdLastSet") == "0",
-                Department = Attr(entry, "department"),
-                Title = Attr(entry, "title"),
-                Office = Attr(entry, "physicalDeliveryOfficeName"),
-                Phone = Attr(entry, "telephoneNumber"),
-                Manager = Attr(entry, "manager"),
-                Ou = Attr(entry, "distinguishedName"),
-                Source = "ad-live",
-                Created = ParseGeneralized(Attr(entry, "whenCreated")),
-                LastLogon = ParseFileTime(Attr(entry, "lastLogonTimestamp"))
-            });
+            var u = MapUser(entry);
+            if (u != null) users.Add(u);
         }
-        _log.Write("info", "ldap", $"SearchUsers returned {users.Count} users");
+
+        var seen = users.Select(u => u.SamAccountName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var msa in SearchManagedServiceAccounts(dc))
+            if (seen.Add(msa.SamAccountName)) users.Add(msa);
+
+        _log.Write("info", "ldap", $"SearchUsers returned {users.Count} users (incl. managed service accounts)");
         return users;
+    }
+
+    public List<DirectoryUser> SearchManagedServiceAccounts(DomainControllerSettings dc)
+    {
+        var baseDn = ResolveBase(dc);
+        var entries = Search(dc, baseDn,
+            "(|(objectClass=msDS-ManagedServiceAccount)(objectClass=msDS-GroupManagedServiceAccount))",
+            SearchScope.Subtree,
+            "sAMAccountName", "displayName", "givenName", "sn", "userPrincipalName", "mail",
+            "department", "title", "physicalDeliveryOfficeName", "telephoneNumber", "manager",
+            "userAccountControl", "distinguishedName", "objectClass", "pwdLastSet", "lockoutTime",
+            "whenCreated", "lastLogonTimestamp", "dNSHostName");
+
+        var accounts = new List<DirectoryUser>();
+        foreach (var entry in entries)
+        {
+            var u = MapUser(entry);
+            if (u == null) continue;
+            u.Type = "managedService";
+            accounts.Add(u);
+        }
+        _log.Write("info", "ldap", $"SearchManagedServiceAccounts returned {accounts.Count} gMSA/sMSA accounts");
+        return accounts;
+    }
+
+    private DirectoryUser? MapUser(SearchResultEntry entry)
+    {
+        var sam = Attr(entry, "sAMAccountName");
+        if (string.IsNullOrEmpty(sam)) return null;
+        var uac = ParseInt(Attr(entry, "userAccountControl"));
+        var classes = Attrs(entry, "objectClass").Select(c => c.ToLowerInvariant()).ToHashSet();
+        var type = "user";
+        if (classes.Contains("msds-groupmanagedserviceaccount") || classes.Contains("msds-managedserviceaccount"))
+            type = "managedService";
+        else if (classes.Contains("inetorgperson") && !classes.Contains("user"))
+            type = "inetOrgPerson";
+        else if (classes.Contains("contact"))
+            type = "contact";
+        else if (classes.Contains("computer"))
+            type = "managedService";
+
+        return new DirectoryUser
+        {
+            SamAccountName = sam,
+            DisplayName = Attr(entry, "displayName", sam),
+            GivenName = Attr(entry, "givenName"),
+            Surname = Attr(entry, "sn"),
+            UserPrincipalName = Attr(entry, "userPrincipalName"),
+            Email = Attr(entry, "mail"),
+            Type = type,
+            Enabled = (uac & AdsUfAccountDisable) == 0,
+            Locked = (uac & AdsUfLockout) != 0 || Attr(entry, "lockoutTime") is { Length: > 0 } and not "0",
+            PasswordNeverExpires = (uac & AdsUfDontExpirePasswd) != 0,
+            CannotChangePassword = (uac & AdsUfPasswdCantChange) != 0,
+            MustChangePassword = Attr(entry, "pwdLastSet") == "0",
+            Department = Attr(entry, "department"),
+            Title = Attr(entry, "title"),
+            Office = Attr(entry, "physicalDeliveryOfficeName"),
+            Phone = Attr(entry, "telephoneNumber"),
+            Manager = Attr(entry, "manager"),
+            Ou = Attr(entry, "distinguishedName"),
+            Source = "ad-live",
+            Created = ParseGeneralized(Attr(entry, "whenCreated")),
+            LastLogon = ParseFileTime(Attr(entry, "lastLogonTimestamp"))
+        };
     }
 
     public List<DirectoryComputer> SearchComputers(DomainControllerSettings dc)
     {
         var baseDn = ResolveBase(dc);
-        var entries = Search(dc, baseDn, "(objectClass=computer)", SearchScope.Subtree,
+        var entries = Search(dc, baseDn,
+            "(&(objectClass=computer)(!(objectClass=msDS-ManagedServiceAccount)))",
+            SearchScope.Subtree,
             "sAMAccountName", "name", "dNSHostName", "operatingSystem", "operatingSystemVersion",
             "userAccountControl", "distinguishedName", "description", "managedBy",
             "servicePrincipalName", "whenCreated", "lastLogonTimestamp");
