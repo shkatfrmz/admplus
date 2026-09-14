@@ -1,7 +1,9 @@
 using System.DirectoryServices.Protocols;
+using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Admplus.Api.Models;
 
 namespace Admplus.Api.Services;
@@ -57,23 +59,40 @@ public class ActiveDirectoryClient
         return Task.CompletedTask;
     }
 
-    public List<DirectoryUser> SearchUsers(DomainControllerSettings dc)
+    private List<SearchResultEntry> Search(DomainControllerSettings dc, string baseDn, string filter, SearchScope scope, params string[] attributes)
     {
         using var connection = Bind(dc);
+        var results = new List<SearchResultEntry>();
+        var request = new SearchRequest(baseDn, filter, scope, attributes);
+        var pageRequest = new PageResultRequestControl(500);
+        request.Controls.Add(pageRequest);
+        var pages = 0;
+        while (true)
+        {
+            var response = (SearchResponse)connection.SendRequest(request);
+            foreach (SearchResultEntry entry in response.Entries) results.Add(entry);
+            pages++;
+            var pageResponse = response.Controls.OfType<PageResultResponseControl>().FirstOrDefault();
+            if (pageResponse?.Cookie is null || pageResponse.Cookie.Length == 0) break;
+            pageRequest.Cookie = pageResponse.Cookie;
+        }
+        _log.Write("debug", "ldap", $"Search {scope} '{baseDn}' {filter} -> {results.Count} entries ({pages} page(s))");
+        return results;
+    }
+
+    public List<DirectoryUser> SearchUsers(DomainControllerSettings dc)
+    {
         var baseDn = ResolveBase(dc);
-        var request = new SearchRequest(
-            baseDn,
+        var entries = Search(dc, baseDn,
             "(&(|(objectClass=user)(objectClass=inetOrgPerson))(!(objectClass=computer)))",
             SearchScope.Subtree,
             "sAMAccountName", "displayName", "givenName", "sn", "userPrincipalName", "mail",
-            "department", "title", "physicalDeliveryOfficeName", "telephoneNumber",
-            "userAccountControl", "distinguishedName", "objectClass", "pwdLastSet", "lockoutTime")
-        {
-            SizeLimit = 500
-        };
-        var response = (SearchResponse)connection.SendRequest(request);
+            "department", "title", "physicalDeliveryOfficeName", "telephoneNumber", "manager",
+            "userAccountControl", "distinguishedName", "objectClass", "pwdLastSet", "lockoutTime",
+            "whenCreated", "lastLogonTimestamp");
+
         var users = new List<DirectoryUser>();
-        foreach (SearchResultEntry entry in response.Entries)
+        foreach (var entry in entries)
         {
             var sam = Attr(entry, "sAMAccountName");
             if (string.IsNullOrEmpty(sam)) continue;
@@ -105,12 +124,215 @@ public class ActiveDirectoryClient
                 Title = Attr(entry, "title"),
                 Office = Attr(entry, "physicalDeliveryOfficeName"),
                 Phone = Attr(entry, "telephoneNumber"),
+                Manager = Attr(entry, "manager"),
                 Ou = Attr(entry, "distinguishedName"),
                 Source = "ad-live",
-                Created = DateTimeOffset.UtcNow
+                Created = ParseGeneralized(Attr(entry, "whenCreated")),
+                LastLogon = ParseFileTime(Attr(entry, "lastLogonTimestamp"))
             });
         }
+        _log.Write("info", "ldap", $"SearchUsers returned {users.Count} users");
         return users;
+    }
+
+    public List<DirectoryComputer> SearchComputers(DomainControllerSettings dc)
+    {
+        var baseDn = ResolveBase(dc);
+        var entries = Search(dc, baseDn, "(objectClass=computer)", SearchScope.Subtree,
+            "sAMAccountName", "name", "dNSHostName", "operatingSystem", "operatingSystemVersion",
+            "userAccountControl", "distinguishedName", "description", "managedBy",
+            "servicePrincipalName", "whenCreated", "lastLogonTimestamp");
+
+        var computers = new List<DirectoryComputer>();
+        foreach (var entry in entries)
+        {
+            var sam = Attr(entry, "sAMAccountName", Attr(entry, "name")).TrimEnd('$');
+            if (string.IsNullOrEmpty(sam)) continue;
+            var uac = ParseInt(Attr(entry, "userAccountControl"));
+            var os = Attr(entry, "operatingSystem");
+            var type = os.Contains("Server", StringComparison.OrdinalIgnoreCase) ? "server" : "workstation";
+            if ((uac & AdsUfServerTrust) != 0) type = "server";
+            if ((uac & AdsUfWorkstationTrust) != 0 && !string.Equals(type, "server", StringComparison.OrdinalIgnoreCase) && os.Length == 0)
+                type = "workstation";
+
+            computers.Add(new DirectoryComputer
+            {
+                Name = sam,
+                DnsHostName = Attr(entry, "dNSHostName"),
+                Os = os,
+                OsVersion = Attr(entry, "operatingSystemVersion"),
+                Type = type,
+                Enabled = (uac & AdsUfAccountDisable) == 0,
+                Ou = Attr(entry, "distinguishedName"),
+                Description = Attr(entry, "description"),
+                ManagedBy = Attr(entry, "managedBy"),
+                ServicePrincipalNames = Attrs(entry, "servicePrincipalName").ToList(),
+                LastLogon = ParseFileTime(Attr(entry, "lastLogonTimestamp")),
+                Created = ParseGeneralized(Attr(entry, "whenCreated")),
+                Source = "ad-live"
+            });
+        }
+        _log.Write("info", "ldap", $"SearchComputers returned {computers.Count} computers");
+        return computers;
+    }
+
+    public List<DirectoryGroup> SearchGroups(DomainControllerSettings dc)
+    {
+        var baseDn = ResolveBase(dc);
+        var entries = Search(dc, baseDn, "(objectClass=group)", SearchScope.Subtree,
+            "sAMAccountName", "name", "displayName", "description", "groupType",
+            "distinguishedName", "mail", "member", "whenCreated");
+
+        var groups = new List<DirectoryGroup>();
+        foreach (var entry in entries)
+        {
+            var sam = Attr(entry, "sAMAccountName", Attr(entry, "name"));
+            if (string.IsNullOrEmpty(sam)) continue;
+            var gt = ParseInt(Attr(entry, "groupType"));
+            var security = (gt & AdsGroupTypeSecurity) != 0;
+            var scope = (gt & AdsGroupTypeUniversal) != 0 ? "universal"
+                : (gt & AdsGroupTypeDomainLocal) != 0 ? "domainLocal" : "global";
+
+            groups.Add(new DirectoryGroup
+            {
+                Name = Attr(entry, "displayName", Attr(entry, "name", sam)),
+                SamAccountName = sam,
+                Type = security ? "security" : "distribution",
+                Scope = scope,
+                Description = Attr(entry, "description"),
+                Ou = Attr(entry, "distinguishedName"),
+                Mail = Attr(entry, "mail"),
+                Members = Attrs(entry, "member").ToList(),
+                Created = ParseGeneralized(Attr(entry, "whenCreated")),
+                Source = "ad-live"
+            });
+        }
+        _log.Write("info", "ldap", $"SearchGroups returned {groups.Count} groups");
+        return groups;
+    }
+
+    public List<OrganizationalUnit> SearchOus(DomainControllerSettings dc)
+    {
+        var baseDn = ResolveBase(dc);
+        var entries = Search(dc, baseDn, "(objectClass=organizationalUnit)", SearchScope.Subtree,
+            "ou", "name", "distinguishedName", "description", "whenCreated");
+
+        var ous = new List<OrganizationalUnit>();
+        foreach (var entry in entries)
+        {
+            var dn = Attr(entry, "distinguishedName");
+            if (string.IsNullOrEmpty(dn)) continue;
+            ous.Add(new OrganizationalUnit
+            {
+                Id = "ou-ad-" + Guid.NewGuid().ToString("n")[..8],
+                Name = Attr(entry, "ou", Attr(entry, "name")),
+                Dn = dn,
+                Description = Attr(entry, "description"),
+                Created = ParseGeneralized(Attr(entry, "whenCreated")),
+                Source = "ad-live"
+            });
+        }
+        _log.Write("info", "ldap", $"SearchOus returned {ous.Count} OUs");
+        return ous;
+    }
+
+    public List<DirectoryGpo> SearchGpos(DomainControllerSettings dc)
+    {
+        var baseDn = ResolveBase(dc);
+        var policiesDn = $"CN=Policies,CN=System,{baseDn}";
+        List<SearchResultEntry> entries;
+        try
+        {
+            entries = Search(dc, policiesDn, "(objectClass=groupPolicyContainer)", SearchScope.OneLevel,
+                "displayName", "name", "cn", "flags", "gPCFileSysPath", "versionNumber", "distinguishedName", "description");
+        }
+        catch (Exception ex)
+        {
+            _log.Write("warn", "ldap", $"GPO container query failed at {policiesDn}", null, ex);
+            entries = new List<SearchResultEntry>();
+        }
+
+        var gpos = new List<DirectoryGpo>();
+        foreach (var entry in entries)
+        {
+            var dn = Attr(entry, "distinguishedName");
+            var guid = CnFromDn(dn);
+            if (string.IsNullOrEmpty(guid)) continue;
+            var flags = ParseInt(Attr(entry, "flags"));
+            var status = flags switch { 0 => "enabled", 1 => "userDisabled", 2 => "computerDisabled", _ => "disabled" };
+            gpos.Add(new DirectoryGpo
+            {
+                Id = "gpo-" + guid.Trim('{', '}').ToLowerInvariant(),
+                Name = Attr(entry, "displayName", guid),
+                Status = status,
+                Description = Attr(entry, "description"),
+                Created = DateTimeOffset.UtcNow,
+                Modified = DateTimeOffset.UtcNow,
+                LinkedOus = new List<string>(),
+                Settings = new Dictionary<string, object>
+                {
+                    ["guid"] = guid,
+                    ["versionNumber"] = Attr(entry, "versionNumber"),
+                    ["gPCFileSysPath"] = Attr(entry, "gPCFileSysPath")
+                },
+                Source = "ad-live"
+            });
+        }
+        ApplyGpoLinks(dc, baseDn, gpos);
+        _log.Write("info", "ldap", $"SearchGpos returned {gpos.Count} GPOs");
+        return gpos;
+    }
+
+    private void ApplyGpoLinks(DomainControllerSettings dc, string baseDn, List<DirectoryGpo> gpos)
+    {
+        var byGuid = new Dictionary<string, DirectoryGpo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var g in gpos)
+            if (g.Settings.TryGetValue("guid", out var v) && v is string guid)
+                byGuid[guid.Trim('{', '}')] = g;
+
+        List<SearchResultEntry> linked;
+        try
+        {
+            linked = Search(dc, baseDn, "(gPLink=*)", SearchScope.Subtree, "distinguishedName", "gPLink");
+        }
+        catch (Exception ex)
+        {
+            _log.Write("warn", "ldap", "GPO link enumeration failed", null, ex);
+            return;
+        }
+
+        foreach (var entry in linked)
+        {
+            var containerDn = Attr(entry, "distinguishedName");
+            foreach (var link in Attrs(entry, "gPLink"))
+            {
+                foreach (Match m in Regex.Matches(link, @"LDAP://CN=\{(?<g>[0-9a-fA-F\-]+)\},[^\];]*(?:;(?<opt>\d+))?", RegexOptions.IgnoreCase))
+                {
+                    if (!byGuid.TryGetValue(m.Groups["g"].Value, out var gpo)) continue;
+                    var options = int.TryParse(m.Groups["opt"].Value, out var o) ? o : 0;
+                    if (!gpo.LinkedOus.Contains(containerDn, StringComparer.OrdinalIgnoreCase))
+                        gpo.LinkedOus.Add(containerDn);
+                    if ((options & 2) != 0) gpo.Enforced = true;
+                    if ((options & 1) != 0 && gpo.Status == "enabled") gpo.Status = "disabled";
+                }
+            }
+        }
+    }
+
+    private static DateTimeOffset ParseGeneralized(string value)
+    {
+        if (DateTimeOffset.TryParseExact(value, "yyyyMMddHHmmss.0Z", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var exact))
+            return exact;
+        if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var loose))
+            return loose;
+        return DateTimeOffset.UtcNow;
+    }
+
+    private static DateTimeOffset? ParseFileTime(string value)
+    {
+        if (!long.TryParse(value, out var ticks) || ticks <= 0) return null;
+        try { return DateTimeOffset.FromFileTime(ticks); }
+        catch { return null; }
     }
 
     public void CreateUser(DomainControllerSettings dc, DirectoryUser user, string? password)

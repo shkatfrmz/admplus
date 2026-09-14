@@ -8,6 +8,7 @@ public class OrganizationalUnit
     public string ParentId { get; set; } = "";
     public string Description { get; set; } = "";
     public DateTimeOffset Created { get; set; }
+    public string Source { get; set; } = "ad";
 }
 
 public class RecycleBinItem

@@ -107,6 +107,7 @@ public class DirectoryGpo
     public DateTimeOffset Created { get; set; }
     public DateTimeOffset Modified { get; set; }
     public Dictionary<string, object> Settings { get; set; } = new();
+    public string Source { get; set; } = "ad";
 }
 
 public class SharePermission

@@ -111,7 +111,8 @@ export default function Settings() {
     setBusy('sync')
     try {
       const r = await api.sync()
-      msg(`Synced ${r.count} directory users (${r.created} created, ${r.updated} updated)`)
+      const x = r.result || {}
+      msg(`Synced users ${x.users?.total ?? r.count ?? 0} (${x.users?.created ?? r.created ?? 0} new/${x.users?.updated ?? r.updated ?? 0} upd), computers ${x.computers?.total ?? 0}, groups ${x.groups?.total ?? 0}, OUs ${x.ous?.total ?? 0}, GPOs ${x.gpos?.total ?? 0}`)
     } catch (err) { msg(err.message, 'err') }
     finally { setBusy('') }
   }
@@ -142,7 +143,7 @@ export default function Settings() {
           <div className="actions" style={{ marginTop: 14 }}>
             <button className="btn primary" type="submit">Save</button>
             <button className="btn" type="button" disabled={busy === 'dc'} onClick={testDc}>{busy === 'dc' ? 'Testing...' : 'Test connection'}</button>
-            <button className="btn" type="button" disabled={busy === 'sync'} onClick={sync}>{busy === 'sync' ? 'Syncing...' : 'Sync users from DC'}</button>
+            <button className="btn" type="button" disabled={busy === 'sync'} onClick={sync}>{busy === 'sync' ? 'Syncing...' : 'Sync directory from DC'}</button>
           </div>
         </form>
 

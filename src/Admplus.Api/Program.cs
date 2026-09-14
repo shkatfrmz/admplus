@@ -278,19 +278,34 @@ app.MapPost("/api/settings/azure-ad/test", async (AzureAdSettings? body, Directo
     }
 });
 
-app.MapPost("/api/settings/sync", (DirectoryStore store, ActiveDirectoryClient ad) =>
+app.MapPost("/api/settings/sync", (DirectoryStore store, ActiveDirectoryClient ad, AppLog appLog) =>
 {
     var s = store.Snapshot();
     if (!s.Settings.DomainController.Connected || string.IsNullOrWhiteSpace(s.Settings.DomainController.Host))
         return Results.Json(new { ok = false, message = "Domain controller is not connected" }, statusCode: 400);
+    var dc = s.Settings.DomainController;
     try
     {
-        var live = ad.SearchUsers(s.Settings.DomainController);
-        var created = 0;
-        var updated = 0;
+        var liveUsers = ad.SearchUsers(dc);
+        var liveComputers = ad.SearchComputers(dc);
+        var liveGroups = ad.SearchGroups(dc);
+        var liveOus = ad.SearchOus(dc);
+        var liveGpos = ad.SearchGpos(dc);
+
+        var result = new
+        {
+            users = new { total = liveUsers.Count, created = 0, updated = 0 },
+            computers = new { total = liveComputers.Count, created = 0, updated = 0 },
+            groups = new { total = liveGroups.Count, created = 0, updated = 0 },
+            ous = new { total = liveOus.Count, created = 0, updated = 0 },
+            gpos = new { total = liveGpos.Count, created = 0, updated = 0 }
+        };
+
+        int uC = 0, uU = 0, cC = 0, cU = 0, gC = 0, gU = 0, oC = 0, oU = 0, pC = 0, pU = 0;
+
         store.Update(st =>
         {
-            foreach (var u in live)
+            foreach (var u in liveUsers)
             {
                 var existing = st.Users.FirstOrDefault(x => x.SamAccountName.Equals(u.SamAccountName, StringComparison.OrdinalIgnoreCase));
                 if (existing != null)
@@ -308,23 +323,126 @@ app.MapPost("/api/settings/sync", (DirectoryStore store, ActiveDirectoryClient a
                     existing.Title = u.Title;
                     existing.Office = u.Office;
                     existing.Phone = u.Phone;
+                    existing.Manager = u.Manager;
                     existing.Ou = u.Ou;
+                    existing.LastLogon = u.LastLogon;
                     existing.Source = "ad-live";
-                    updated++;
+                    uU++;
                 }
                 else
                 {
                     u.Id = DirectoryStore.NewId("u");
                     st.Users.Add(u);
-                    created++;
+                    uC++;
                 }
             }
-            DirectoryStore.AddAudit(st, "sync", "directory", "users", $"Synced {live.Count} users via LDAP ({created} created, {updated} updated)");
+
+            foreach (var c in liveComputers)
+            {
+                var existing = st.Computers.FirstOrDefault(x => x.Name.Equals(c.Name, StringComparison.OrdinalIgnoreCase));
+                if (existing != null)
+                {
+                    existing.DnsHostName = c.DnsHostName;
+                    existing.Os = c.Os;
+                    existing.OsVersion = c.OsVersion;
+                    existing.Type = c.Type;
+                    existing.Enabled = c.Enabled;
+                    existing.Ou = c.Ou;
+                    existing.Description = c.Description;
+                    existing.ManagedBy = c.ManagedBy;
+                    existing.ServicePrincipalNames = c.ServicePrincipalNames;
+                    existing.LastLogon = c.LastLogon;
+                    existing.Source = "ad-live";
+                    cU++;
+                }
+                else
+                {
+                    c.Id = DirectoryStore.NewId("c");
+                    st.Computers.Add(c);
+                    cC++;
+                }
+            }
+
+            foreach (var g in liveGroups)
+            {
+                var existing = st.Groups.FirstOrDefault(x => x.SamAccountName.Equals(g.SamAccountName, StringComparison.OrdinalIgnoreCase));
+                if (existing != null)
+                {
+                    existing.Name = g.Name;
+                    existing.Type = g.Type;
+                    existing.Scope = g.Scope;
+                    existing.Description = g.Description;
+                    existing.Ou = g.Ou;
+                    existing.Mail = g.Mail;
+                    existing.Members = g.Members;
+                    existing.Source = "ad-live";
+                    gU++;
+                }
+                else
+                {
+                    g.Id = DirectoryStore.NewId("g");
+                    st.Groups.Add(g);
+                    gC++;
+                }
+            }
+
+            foreach (var o in liveOus)
+            {
+                var existing = st.Ous.FirstOrDefault(x => x.Dn.Equals(o.Dn, StringComparison.OrdinalIgnoreCase));
+                if (existing != null)
+                {
+                    existing.Name = o.Name;
+                    existing.Description = o.Description;
+                    existing.Source = "ad-live";
+                    oU++;
+                }
+                else
+                {
+                    st.Ous.Add(o);
+                    oC++;
+                }
+            }
+
+            foreach (var p in liveGpos)
+            {
+                var existing = st.Gpos.FirstOrDefault(x => x.Id.Equals(p.Id, StringComparison.OrdinalIgnoreCase));
+                if (existing != null)
+                {
+                    existing.Name = p.Name;
+                    existing.Status = p.Status;
+                    existing.Description = p.Description;
+                    existing.LinkedOus = p.LinkedOus;
+                    existing.Enforced = p.Enforced;
+                    existing.Settings = p.Settings;
+                    existing.Source = "ad-live";
+                    pU++;
+                }
+                else
+                {
+                    st.Gpos.Add(p);
+                    pC++;
+                }
+            }
+
+            DirectoryStore.AddAudit(st, "sync", "directory", "full",
+                $"LDAP sync: users {liveUsers.Count} ({uC} new/{uU} upd), computers {liveComputers.Count} ({cC}/{cU}), " +
+                $"groups {liveGroups.Count} ({gC}/{gU}), OUs {liveOus.Count} ({oC}/{oU}), GPOs {liveGpos.Count} ({pC}/{pU})");
         });
-        return Results.Json(new { ok = true, count = live.Count, created, updated });
+
+        appLog.Write("info", "sync", $"Directory sync complete: users={liveUsers.Count} computers={liveComputers.Count} groups={liveGroups.Count} ous={liveOus.Count} gpos={liveGpos.Count}");
+        result = new
+        {
+            users = new { total = liveUsers.Count, created = uC, updated = uU },
+            computers = new { total = liveComputers.Count, created = cC, updated = cU },
+            groups = new { total = liveGroups.Count, created = gC, updated = gU },
+            ous = new { total = liveOus.Count, created = oC, updated = oU },
+            gpos = new { total = liveGpos.Count, created = pC, updated = pU }
+        };
+        return Results.Json(new { ok = true, result });
     }
     catch (Exception ex)
     {
+        appLog.Write("error", "sync", "Directory sync failed", null, ex);
         return Results.Json(new { ok = false, message = ex.Message }, statusCode: 400);
     }
 });
