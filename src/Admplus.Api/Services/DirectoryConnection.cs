@@ -22,6 +22,7 @@ public static class DirectoryConnection
             cur.Password = body.Password;
         if (!string.IsNullOrWhiteSpace(body.BaseDn)) cur.BaseDn = body.BaseDn.Trim();
         if (!string.IsNullOrWhiteSpace(body.Domain)) cur.Domain = body.Domain.Trim();
+        if (body.SearchPageSize > 0) cur.SearchPageSize = Math.Clamp(body.SearchPageSize, 100, 5000);
         Normalize(cur);
     }
 
@@ -44,6 +45,10 @@ public static class DirectoryConnection
 
         if (dc.Port <= 0)
             dc.Port = dc.UseSsl ? 636 : 389;
+
+        if (dc.SearchPageSize <= 0)
+            dc.SearchPageSize = 1000;
+        dc.SearchPageSize = Math.Clamp(dc.SearchPageSize, 100, 5000);
 
         if (!string.IsNullOrWhiteSpace(dc.BindDn) &&
             !dc.BindDn.Contains('=', StringComparison.Ordinal) &&

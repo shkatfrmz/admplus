@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { Badge, Field, Flash, PageHead, fmt } from '../ui.jsx'
 
-const emptyDc = { host: '', port: 389, useSsl: false, bindDn: '', password: '', baseDn: '', domain: '' }
+const emptyDc = { host: '', port: 389, useSsl: false, bindDn: '', password: '', baseDn: '', domain: '', searchPageSize: 1000 }
 const emptyAz = { tenantId: '', clientId: '', clientSecret: '' }
 
 export default function Settings() {
@@ -136,10 +136,11 @@ export default function Settings() {
             <Field label="Domain"><input value={dc.domain} onChange={(e) => setDc({ ...dc, domain: e.target.value })} placeholder="labnet.local" /></Field>
             <Field label="Base DN"><input value={dc.baseDn} onChange={(e) => setDc({ ...dc, baseDn: e.target.value })} placeholder="DC=labnet,DC=local" /></Field>
             <Field label="Bind DN / UPN" full><input value={dc.bindDn} onChange={(e) => setDc({ ...dc, bindDn: e.target.value })} placeholder="CN=Administrator,CN=Users,DC=labnet,DC=local or Administrator@labnet.local" /></Field>
+            <Field label="Page size"><input type="number" min="100" max="5000" step="100" value={dc.searchPageSize ?? 1000} onChange={(e) => setDc({ ...dc, searchPageSize: Number(e.target.value) })} /></Field>
             <Field label="Password" full><input type="password" value={dc.password === '********' ? '' : (dc.password || '')} onChange={(e) => setDc({ ...dc, password: e.target.value })} placeholder={dc.password === '********' ? 'Saved — type again to change' : 'Bind password'} autoComplete="off" /></Field>
             <label className="check"><input type="checkbox" checked={Boolean(dc.useSsl)} onChange={(e) => setDc({ ...dc, useSsl: e.target.checked, port: e.target.checked ? 636 : 389 })} /> Use LDAPS</label>
           </div>
-          <p className="muted">Host can be a DC FQDN or the DNS domain. Bind DN can be a distinguished name, UPN, or SAM. Test saves the form first. Failures are written to Logs.</p>
+          <p className="muted">Host can be a DC FQDN or the DNS domain. Bind DN can be a distinguished name, UPN, or SAM. Test saves the form first. Sync pages through the whole domain, so large directories (tens of thousands of objects) are fetched completely. Page size defaults to 1000; lower it if the DC rejects large pages. Failures are written to Logs.</p>
           <div className="actions" style={{ marginTop: 14 }}>
             <button className="btn primary" type="submit">Save</button>
             <button className="btn" type="button" disabled={busy === 'dc'} onClick={testDc}>{busy === 'dc' ? 'Testing...' : 'Test connection'}</button>

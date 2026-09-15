@@ -9,6 +9,7 @@ public class DomainControllerSettings
     public string Password { get; set; } = "";
     public string BaseDn { get; set; } = "";
     public string Domain { get; set; } = "";
+    public int SearchPageSize { get; set; } = 1000;
     public bool Connected { get; set; }
     public DateTimeOffset? LastTest { get; set; }
     public string? LastError { get; set; }
@@ -52,6 +53,7 @@ public class DirectoryUser
     public string Phone { get; set; } = "";
     public string Manager { get; set; } = "";
     public string Ou { get; set; } = "";
+    public string Dn { get; set; } = "";
     public List<string> Groups { get; set; } = new();
     public DateTimeOffset? LastLogon { get; set; }
     public DateTimeOffset Created { get; set; }
@@ -71,6 +73,7 @@ public class DirectoryComputer
     public string Type { get; set; } = "workstation";
     public bool Enabled { get; set; } = true;
     public string Ou { get; set; } = "";
+    public string Dn { get; set; } = "";
     public string Description { get; set; } = "";
     public string IpAddress { get; set; } = "";
     public DateTimeOffset? LastLogon { get; set; }
@@ -89,6 +92,7 @@ public class DirectoryGroup
     public string Scope { get; set; } = "global";
     public string Description { get; set; } = "";
     public string Ou { get; set; } = "";
+    public string Dn { get; set; } = "";
     public List<string> Members { get; set; } = new();
     public List<string> MemberOf { get; set; } = new();
     public string Mail { get; set; } = "";

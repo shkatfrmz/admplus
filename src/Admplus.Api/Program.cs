@@ -133,6 +133,7 @@ app.MapGet("/api/settings", (DirectoryStore store) =>
             password = Mask(s.DomainController.Password),
             s.DomainController.BaseDn,
             s.DomainController.Domain,
+            s.DomainController.SearchPageSize,
             s.DomainController.Connected,
             s.DomainController.LastTest,
             s.DomainController.LastError
@@ -162,7 +163,7 @@ app.MapPut("/api/settings/domain-controller", (DomainControllerSettings body, Di
     return Results.Json(new
     {
         dc.Host, dc.Port, dc.UseSsl, dc.BindDn, password = Mask(dc.Password),
-        dc.BaseDn, dc.Domain, dc.Connected, dc.LastTest, dc.LastError
+        dc.BaseDn, dc.Domain, dc.SearchPageSize, dc.Connected, dc.LastTest, dc.LastError
     });
 });
 
@@ -325,6 +326,7 @@ app.MapPost("/api/settings/sync", (DirectoryStore store, ActiveDirectoryClient a
                     existing.Phone = u.Phone;
                     existing.Manager = u.Manager;
                     existing.Ou = u.Ou;
+                    existing.Dn = u.Dn;
                     existing.LastLogon = u.LastLogon;
                     existing.Source = "ad-live";
                     uU++;
@@ -348,6 +350,7 @@ app.MapPost("/api/settings/sync", (DirectoryStore store, ActiveDirectoryClient a
                     existing.Type = c.Type;
                     existing.Enabled = c.Enabled;
                     existing.Ou = c.Ou;
+                    existing.Dn = c.Dn;
                     existing.Description = c.Description;
                     existing.ManagedBy = c.ManagedBy;
                     existing.ServicePrincipalNames = c.ServicePrincipalNames;
@@ -373,6 +376,7 @@ app.MapPost("/api/settings/sync", (DirectoryStore store, ActiveDirectoryClient a
                     existing.Scope = g.Scope;
                     existing.Description = g.Description;
                     existing.Ou = g.Ou;
+                    existing.Dn = g.Dn;
                     existing.Mail = g.Mail;
                     existing.Members = g.Members;
                     existing.Source = "ad-live";
@@ -385,6 +389,30 @@ app.MapPost("/api/settings/sync", (DirectoryStore store, ActiveDirectoryClient a
                     gC++;
                 }
             }
+
+            var dnToId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var u in st.Users) if (!string.IsNullOrEmpty(u.Dn)) dnToId[u.Dn] = u.Id;
+            foreach (var c in st.Computers) if (!string.IsNullOrEmpty(c.Dn)) dnToId[c.Dn] = c.Id;
+            foreach (var g in st.Groups) if (!string.IsNullOrEmpty(g.Dn)) dnToId[g.Dn] = g.Id;
+
+            var userById = st.Users.ToDictionary(u => u.Id, u => u);
+            foreach (var g in liveGroups)
+            {
+                var node = st.Groups.FirstOrDefault(x => x.SamAccountName.Equals(g.SamAccountName, StringComparison.OrdinalIgnoreCase));
+                if (node is null) continue;
+                node.Members = g.Members
+                    .Select(m => dnToId.TryGetValue(m, out var id) ? id : null)
+                    .Where(id => id != null)
+                    .Select(id => id!)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+            foreach (var u in st.Users)
+                if (u.Source == "ad-live") u.Groups = new List<string>();
+            foreach (var g in st.Groups)
+                foreach (var mid in g.Members)
+                    if (userById.TryGetValue(mid, out var member) && !member.Groups.Contains(g.Id))
+                        member.Groups.Add(g.Id);
 
             foreach (var o in liveOus)
             {
@@ -576,14 +604,14 @@ void UserFlag(string id, DirectoryStore store, ActiveDirectoryClient ad, Action<
     {
         var u = s.Users.FirstOrDefault(x => x.Id == id) ?? throw new KeyNotFoundException("User not found");
         apply(u, s);
-        if (s.Settings.DomainController.Connected && LooksLikeDn(u.Ou))
+        if (s.Settings.DomainController.Connected && LooksLikeDn(DnOf(u.Dn, u.Ou)))
         {
             try
             {
-                if (action == "enable") ad.SetUserEnabled(s.Settings.DomainController, u.Ou, true);
-                if (action == "disable") ad.SetUserEnabled(s.Settings.DomainController, u.Ou, false);
-                if (action == "unlock") ad.UnlockUser(s.Settings.DomainController, u.Ou);
-                if (action == "reset-password") ad.ResetPassword(s.Settings.DomainController, u.Ou, ActiveDirectoryClient.RandomPassword());
+                if (action == "enable") ad.SetUserEnabled(s.Settings.DomainController, DnOf(u.Dn, u.Ou), true);
+                if (action == "disable") ad.SetUserEnabled(s.Settings.DomainController, DnOf(u.Dn, u.Ou), false);
+                if (action == "unlock") ad.UnlockUser(s.Settings.DomainController, DnOf(u.Dn, u.Ou));
+                if (action == "reset-password") ad.ResetPassword(s.Settings.DomainController, DnOf(u.Dn, u.Ou), ActiveDirectoryClient.RandomPassword());
             }
             catch { /* local store remains source of truth when DC op fails */ }
         }
@@ -592,6 +620,7 @@ void UserFlag(string id, DirectoryStore store, ActiveDirectoryClient ad, Action<
 }
 
 bool LooksLikeDn(string? v) => !string.IsNullOrEmpty(v) && v.Contains("DC=", StringComparison.OrdinalIgnoreCase) && v.Contains("CN=", StringComparison.OrdinalIgnoreCase);
+string DnOf(string? dn, string? ou) => string.IsNullOrEmpty(dn) ? (ou ?? "") : dn;
 
 app.MapPost("/api/users/{id}/enable", (string id, DirectoryStore store, ActiveDirectoryClient ad) =>
 {
@@ -618,9 +647,9 @@ app.MapDelete("/api/users/{id}", (string id, DirectoryStore store, ActiveDirecto
     store.Update(s =>
     {
         var u = s.Users.FirstOrDefault(x => x.Id == id) ?? throw new KeyNotFoundException();
-        if (s.Settings.DomainController.Connected && LooksLikeDn(u.Ou))
+        if (s.Settings.DomainController.Connected && LooksLikeDn(DnOf(u.Dn, u.Ou)))
         {
-            try { ad.DeleteObject(s.Settings.DomainController, u.Ou); } catch { }
+            try { ad.DeleteObject(s.Settings.DomainController, DnOf(u.Dn, u.Ou)); } catch { }
         }
         DirectoryStore.Recycle(s, "user", u.Id, u.DisplayName, u.Ou, u);
         s.Users.RemoveAll(x => x.Id == id);
@@ -730,9 +759,9 @@ app.MapDelete("/api/computers/{id}", (string id, DirectoryStore store, ActiveDir
     store.Update(s =>
     {
         var c = s.Computers.FirstOrDefault(x => x.Id == id) ?? throw new KeyNotFoundException();
-        if (s.Settings.DomainController.Connected && LooksLikeDn(c.Ou))
+        if (s.Settings.DomainController.Connected && LooksLikeDn(DnOf(c.Dn, c.Ou)))
         {
-            try { ad.DeleteObject(s.Settings.DomainController, c.Ou); } catch { }
+            try { ad.DeleteObject(s.Settings.DomainController, DnOf(c.Dn, c.Ou)); } catch { }
         }
         DirectoryStore.Recycle(s, "computer", c.Id, c.Name, c.Ou, c);
         s.Computers.RemoveAll(x => x.Id == id);
@@ -829,9 +858,9 @@ app.MapPost("/api/groups/{id}/members", (string id, JsonElement body, DirectoryS
         if (!g.Members.Contains(memberId)) g.Members.Add(memberId);
         var user = s.Users.FirstOrDefault(u => u.Id == memberId);
         if (user != null && !user.Groups.Contains(g.Id)) user.Groups.Add(g.Id);
-        if (s.Settings.DomainController.Connected && LooksLikeDn(g.Ou) && user != null && LooksLikeDn(user.Ou))
+        if (s.Settings.DomainController.Connected && LooksLikeDn(DnOf(g.Dn, g.Ou)) && user != null && LooksLikeDn(DnOf(user.Dn, user.Ou)))
         {
-            try { ad.AddGroupMember(s.Settings.DomainController, g.Ou, user.Ou); } catch { }
+            try { ad.AddGroupMember(s.Settings.DomainController, DnOf(g.Dn, g.Ou), DnOf(user.Dn, user.Ou)); } catch { }
         }
         DirectoryStore.AddAudit(s, "add-member", "group", g.Name, $"Added member {memberId}");
         return g;
@@ -847,9 +876,9 @@ app.MapDelete("/api/groups/{id}/members/{memberId}", (string id, string memberId
         g.Members.RemoveAll(m => m == memberId);
         var user = s.Users.FirstOrDefault(u => u.Id == memberId);
         if (user != null) user.Groups.RemoveAll(x => x == g.Id);
-        if (s.Settings.DomainController.Connected && LooksLikeDn(g.Ou) && user != null && LooksLikeDn(user.Ou))
+        if (s.Settings.DomainController.Connected && LooksLikeDn(DnOf(g.Dn, g.Ou)) && user != null && LooksLikeDn(DnOf(user.Dn, user.Ou)))
         {
-            try { ad.RemoveGroupMember(s.Settings.DomainController, g.Ou, user.Ou); } catch { }
+            try { ad.RemoveGroupMember(s.Settings.DomainController, DnOf(g.Dn, g.Ou), DnOf(user.Dn, user.Ou)); } catch { }
         }
         DirectoryStore.AddAudit(s, "remove-member", "group", g.Name, $"Removed member {memberId}");
         return g;
@@ -862,9 +891,9 @@ app.MapDelete("/api/groups/{id}", (string id, DirectoryStore store, ActiveDirect
     store.Update(s =>
     {
         var g = s.Groups.FirstOrDefault(x => x.Id == id) ?? throw new KeyNotFoundException();
-        if (s.Settings.DomainController.Connected && LooksLikeDn(g.Ou))
+        if (s.Settings.DomainController.Connected && LooksLikeDn(DnOf(g.Dn, g.Ou)))
         {
-            try { ad.DeleteObject(s.Settings.DomainController, g.Ou); } catch { }
+            try { ad.DeleteObject(s.Settings.DomainController, DnOf(g.Dn, g.Ou)); } catch { }
         }
         DirectoryStore.Recycle(s, "group", g.Id, g.Name, g.Ou, g);
         s.Groups.RemoveAll(x => x.Id == id);
@@ -1024,11 +1053,11 @@ app.MapGet("/api/laps/{id}", (string id, DirectoryStore store, ActiveDirectoryCl
         if (s.Settings.DomainController.Connected)
         {
             var computer = s.Computers.FirstOrDefault(c => c.Id == item.ComputerId);
-            if (computer != null && LooksLikeDn(computer.Ou))
+            if (computer != null && LooksLikeDn(DnOf(computer.Dn, computer.Ou)))
             {
                 try
                 {
-                    var live = ad.ReadMsLapsPassword(s.Settings.DomainController, computer.Ou);
+                    var live = ad.ReadMsLapsPassword(s.Settings.DomainController, DnOf(computer.Dn, computer.Ou));
                     if (!string.IsNullOrEmpty(live)) item.Password = live;
                 }
                 catch { }

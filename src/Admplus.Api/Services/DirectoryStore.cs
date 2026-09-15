@@ -12,7 +12,7 @@ public class DirectoryStore
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true,
+        WriteIndented = false,
         PropertyNameCaseInsensitive = true
     };
 
@@ -28,10 +28,32 @@ public class DirectoryStore
     {
         lock (_gate)
         {
-            var json = JsonSerializer.Serialize(_state, JsonOpts);
-            return JsonSerializer.Deserialize<DirectoryState>(json, JsonOpts)!;
+            return Clone(_state);
         }
     }
+
+    private static DirectoryState Clone(DirectoryState s) => new()
+    {
+        Settings = s.Settings,
+        Users = new List<DirectoryUser>(s.Users),
+        Computers = new List<DirectoryComputer>(s.Computers),
+        Groups = new List<DirectoryGroup>(s.Groups),
+        Gpos = new List<DirectoryGpo>(s.Gpos),
+        Shares = new List<DirectoryShare>(s.Shares),
+        Laps = new List<LapsRecord>(s.Laps),
+        Audit = new List<AuditEntry>(s.Audit),
+        Ous = new List<OrganizationalUnit>(s.Ous),
+        RecycleBin = new List<RecycleBinItem>(s.RecycleBin),
+        JitGrants = new List<JitGrant>(s.JitGrants),
+        PasswordPolicies = new List<PasswordSettingsObject>(s.PasswordPolicies),
+        GpoBackups = new List<GpoBackup>(s.GpoBackups),
+        BitLockerKeys = new List<BitLockerKey>(s.BitLockerKeys),
+        Spns = new List<SpnRecord>(s.Spns),
+        Operators = new List<OperatorAccount>(s.Operators),
+        LapsGrants = new List<LapsJitGrant>(s.LapsGrants),
+        Hybrid = new List<HybridIdentity>(s.Hybrid),
+        SecurityHealth = s.SecurityHealth
+    };
 
     public T Update<T>(Func<DirectoryState, T> mutator)
     {

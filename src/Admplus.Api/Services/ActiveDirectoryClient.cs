@@ -59,24 +59,53 @@ public class ActiveDirectoryClient
         return Task.CompletedTask;
     }
 
+    private const int DefaultPageSize = 1000;
+
     private List<SearchResultEntry> Search(DomainControllerSettings dc, string baseDn, string filter, SearchScope scope, params string[] attributes)
     {
         using var connection = Bind(dc);
+        connection.Timeout = TimeSpan.FromSeconds(120);
+
         var results = new List<SearchResultEntry>();
-        var request = new SearchRequest(baseDn, filter, scope, attributes);
-        var pageRequest = new PageResultRequestControl(500);
-        request.Controls.Add(pageRequest);
+        var pageSize = dc.SearchPageSize > 0 ? dc.SearchPageSize : DefaultPageSize;
+        var initialPageSize = pageSize;
+        byte[]? cookie = null;
         var pages = 0;
+
         while (true)
         {
-            var response = (SearchResponse)connection.SendRequest(request);
+            var request = new SearchRequest(baseDn, filter, scope, attributes);
+            var pageRequest = new PageResultRequestControl(pageSize) { Cookie = cookie };
+            request.Controls.Add(pageRequest);
+
+            SearchResponse response;
+            try
+            {
+                response = (SearchResponse)connection.SendRequest(request);
+            }
+            catch (LdapException ex) when (pageSize > 100 && (ex.ErrorCode == 4 || ex.ErrorCode == 11))
+            {
+                pageSize = Math.Max(100, pageSize / 2);
+                _log.Write("warn", "ldap", $"DC rejected page size {pageSize * 2} ({ex.ServerErrorMessage}); retrying with {pageSize}");
+                continue;
+            }
+
             foreach (SearchResultEntry entry in response.Entries) results.Add(entry);
             pages++;
+
             var pageResponse = response.Controls.OfType<PageResultResponseControl>().FirstOrDefault();
-            if (pageResponse?.Cookie is null || pageResponse.Cookie.Length == 0) break;
-            pageRequest.Cookie = pageResponse.Cookie;
+            cookie = pageResponse?.Cookie;
+            if (cookie is null || cookie.Length == 0)
+            {
+                if (response.Entries.Count >= pageSize)
+                    _log.Write("warn", "ldap",
+                        $"Search '{filter}' returned {results.Count} entries with no paging cookie; server may enforce a size limit, results could be truncated");
+                break;
+            }
         }
-        _log.Write("debug", "ldap", $"Search {scope} '{baseDn}' {filter} -> {results.Count} entries ({pages} page(s))");
+
+        _log.Write("info", "ldap",
+            $"Search {scope} '{baseDn}' {filter} -> {results.Count} entries over {pages} page(s) (page size {initialPageSize}{(pageSize != initialPageSize ? $" -> {pageSize}" : "")})");
         return results;
     }
 
@@ -165,6 +194,7 @@ public class ActiveDirectoryClient
             Phone = Attr(entry, "telephoneNumber"),
             Manager = Attr(entry, "manager"),
             Ou = ParentDnOf(Attr(entry, "distinguishedName")),
+            Dn = Attr(entry, "distinguishedName"),
             Source = "ad-live",
             Created = ParseGeneralized(Attr(entry, "whenCreated")),
             LastLogon = ParseFileTime(Attr(entry, "lastLogonTimestamp"))
@@ -202,6 +232,7 @@ public class ActiveDirectoryClient
                 Type = type,
                 Enabled = (uac & AdsUfAccountDisable) == 0,
                 Ou = ParentDnOf(Attr(entry, "distinguishedName")),
+                Dn = Attr(entry, "distinguishedName"),
                 Description = Attr(entry, "description"),
                 ManagedBy = Attr(entry, "managedBy"),
                 ServicePrincipalNames = Attrs(entry, "servicePrincipalName").ToList(),
@@ -239,14 +270,72 @@ public class ActiveDirectoryClient
                 Scope = scope,
                 Description = Attr(entry, "description"),
                 Ou = ParentDnOf(Attr(entry, "distinguishedName")),
+                Dn = Attr(entry, "distinguishedName"),
                 Mail = Attr(entry, "mail"),
                 Members = Attrs(entry, "member").ToList(),
                 Created = ParseGeneralized(Attr(entry, "whenCreated")),
                 Source = "ad-live"
             });
         }
-        _log.Write("info", "ldap", $"SearchGroups returned {groups.Count} groups");
+
+        var ranged = 0;
+        foreach (var g in groups)
+        {
+            if (g.Members.Count < MaxPlainMemberValues || string.IsNullOrEmpty(g.Dn)) continue;
+            var full = RangedAttribute(dc, g.Dn, "member");
+            if (full.Count > g.Members.Count)
+            {
+                g.Members = full;
+                ranged++;
+            }
+        }
+
+        _log.Write("info", "ldap", $"SearchGroups returned {groups.Count} groups (ranged member retrieval for {ranged} large group(s))");
         return groups;
+    }
+
+    private const int MaxPlainMemberValues = 500;
+
+    private List<string> RangedAttribute(DomainControllerSettings dc, string dn, string attribute)
+    {
+        var values = new List<string>();
+        using var connection = Bind(dc);
+        connection.Timeout = TimeSpan.FromSeconds(120);
+        var start = 0;
+        while (true)
+        {
+            SearchResponse response;
+            try
+            {
+                response = (SearchResponse)connection.SendRequest(
+                    new SearchRequest(dn, "(objectClass=*)", SearchScope.Base, $"{attribute};range={start}-*"));
+            }
+            catch (LdapException ex)
+            {
+                if (start > 0) break;
+                _log.Write("warn", "ldap", $"Ranged {attribute} read on {dn} failed: {ex.ServerErrorMessage}", null, ex);
+                break;
+            }
+
+            if (response.Entries.Count == 0) break;
+            var entry = response.Entries[0];
+            var rangedName = entry.Attributes.AttributeNames.Cast<string>()
+                .FirstOrDefault(n => n.StartsWith(attribute + ";range=", StringComparison.OrdinalIgnoreCase));
+
+            if (rangedName is null)
+            {
+                if (entry.Attributes.Contains(attribute)) values.AddRange(Attrs(entry, attribute));
+                break;
+            }
+
+            values.AddRange(Attrs(entry, rangedName));
+            var high = rangedName[(rangedName.LastIndexOf('-') + 1)..];
+            if (high == "*") break;
+            if (!int.TryParse(high, out var last)) break;
+            start = last + 1;
+        }
+        _log.Write("debug", "ldap", $"Ranged {attribute} on {dn} -> {values.Count} values");
+        return values;
     }
 
     public List<OrganizationalUnit> SearchOus(DomainControllerSettings dc)
