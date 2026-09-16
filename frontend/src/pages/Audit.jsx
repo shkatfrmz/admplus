@@ -1,5 +1,5 @@
 import { api } from '../api.js'
-import { Badge, PageHead, fmt, useQueryList } from '../ui.jsx'
+import { Badge, PageHead, Pager, fmt, useQueryList } from '../ui.jsx'
 
 export default function Audit() {
   const list = useQueryList(api.audit)
@@ -35,7 +35,7 @@ export default function Audit() {
           </tbody>
         </table>
       </div>
-      <p className="muted">{list.data.total} events</p>
+      <Pager list={list} />
     </div>
   )
 }

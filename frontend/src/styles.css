@@ -341,6 +341,19 @@ textarea { min-height: 80px; resize: vertical; }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .empty { padding: 28px; text-align: center; color: var(--muted); }
 
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 2px 2px;
+  font-size: 12px;
+}
+.pager-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pager-controls .btn { padding: 5px 10px; font-size: 12px; }
+.pager select { padding: 5px 8px; font-size: 12px; }
+
 .chart-bars { display: flex; gap: 10px; align-items: flex-end; height: 120px; }
 .bar {
   flex: 1;

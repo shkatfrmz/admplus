@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../api.js'
-import { Badge, Field, Flash, Modal, PageHead, fmt, useQueryList } from '../ui.jsx'
+import { Badge, Field, Flash, Modal, PageHead, Pager, fmt, useQueryList } from '../ui.jsx'
 
 const TYPES = ['workstation', 'laptop', 'server', 'domainController', 'virtual']
 
@@ -76,6 +76,7 @@ export default function Computers() {
           </tbody>
         </table>
       </div>
+      <Pager list={list} />
 
       {detail && (
         <Modal title={detail.name} onClose={() => setDetail(null)}>

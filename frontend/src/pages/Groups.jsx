@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
-import { Badge, Field, Flash, Modal, PageHead, useQueryList } from '../ui.jsx'
+import { Badge, Field, Flash, Modal, PageHead, Pager, useQueryList } from '../ui.jsx'
 
 const empty = { name: '', samAccountName: '', type: 'security', scope: 'global', description: '', mail: '', ou: 'OU=Groups,DC=contoso,DC=local', members: [] }
 
@@ -85,6 +85,7 @@ export default function Groups() {
           </tbody>
         </table>
       </div>
+      <Pager list={list} />
 
       {detail && (
         <Modal title={detail.name} onClose={() => setDetail(null)}>

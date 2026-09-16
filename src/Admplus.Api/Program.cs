@@ -69,7 +69,7 @@ object Page<T>(IEnumerable<T> source, string? q, string? type, int page, int pag
     if (!string.IsNullOrWhiteSpace(type) && typeOf != null)
         items = items.Where(x => typeOf(x) == type);
     page = Math.Max(1, page);
-    pageSize = Math.Clamp(pageSize, 1, 200);
+    pageSize = Math.Clamp(pageSize, 1, 1000);
     var list = items.ToList();
     return new { items = list.Skip((page - 1) * pageSize).Take(pageSize), total = list.Count, page, pageSize };
 }
@@ -1044,7 +1044,7 @@ app.MapGet("/api/laps", (DirectoryStore store, string? q, int page = 1, int page
         expiration = l.Expiration, lastRotated = l.LastRotated,
         daysRemaining = (int)Math.Ceiling((l.Expiration - DateTimeOffset.UtcNow).TotalDays)
     });
-    return Results.Json(Page(list, q, null, page, pageSize));
+    return Results.Json(Page(list, q, null, page, pageSize, null, l => $"{l.computerName}\n{l.account}"));
 });
 
 app.MapGet("/api/laps/{id}", (string id, DirectoryStore store, ActiveDirectoryClient ad) =>
@@ -1126,7 +1126,7 @@ app.MapPost("/api/laps/{id}/rotate", (string id, DirectoryStore store) =>
 });
 
 app.MapGet("/api/audit", (DirectoryStore store, string? q, int page = 1, int pageSize = 50) =>
-    Results.Json(Page(store.Snapshot().Audit, q, null, page, pageSize)));
+    Results.Json(Page(store.Snapshot().Audit, q, null, page, pageSize, null, a => $"{a.Action}\n{a.TargetType}\n{a.Target}\n{a.Detail}\n{a.Actor}\n{a.Result}")));
 
 app.MapGet("/api/reports", (DirectoryStore store) =>
 {

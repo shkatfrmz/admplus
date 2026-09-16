@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api.js'
-import { Badge, Field, Flash, Modal, PageHead, fmt, useQueryList } from '../ui.jsx'
+import { Badge, Field, Flash, Modal, PageHead, Pager, fmt, useQueryList } from '../ui.jsx'
 
 const USER_TYPES = ['user', 'service', 'guest', 'inetOrgPerson', 'contact', 'managedService']
 
@@ -111,7 +111,7 @@ export default function Users() {
         </table>
         {!list.data.items.length && <div className="empty">No users match the current filter.</div>}
       </div>
-      <p className="muted">{list.data.total} accounts</p>
+      <Pager list={list} />
 
       {detail && (
         <Modal title={detail.displayName} onClose={() => setDetail(null)}>

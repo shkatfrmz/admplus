@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../api.js'
-import { Badge, Field, Flash, Modal, PageHead, useQueryList } from '../ui.jsx'
+import { Badge, Field, Flash, Modal, PageHead, Pager, useQueryList } from '../ui.jsx'
 
 const empty = { name: '', path: '', server: 'FS01', description: '', hidden: false, permissionsText: 'Domain Users:read' }
 
@@ -75,6 +75,7 @@ export default function Shares() {
           </tbody>
         </table>
       </div>
+      <Pager list={list} />
 
       {modal && (
         <Modal title={form.id ? 'Edit share' : 'Create share'} onClose={() => setModal(null)}>
