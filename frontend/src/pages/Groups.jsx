@@ -50,7 +50,7 @@ export default function Groups() {
     <div>
       <PageHead title="Groups" subtitle="Security and distribution groups — global, universal, and domain local.">
         <input className="search" placeholder="Search groups" value={list.q} onChange={(e) => list.setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && list.reload()} />
-        <select value={list.type} onChange={(e) => { list.setType(e.target.value); setTimeout(list.reload, 0) }}>
+        <select value={list.type} onChange={(e) => { list.setType(e.target.value) }}>
           <option value="">All types</option>
           <option value="security">security</option>
           <option value="distribution">distribution</option>

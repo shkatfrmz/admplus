@@ -37,10 +37,7 @@ export default function Users() {
 
   useEffect(() => {
     const q = params.get('q')
-    if (q) {
-      list.setQ(q)
-      setTimeout(list.reload, 0)
-    }
+    if (q) list.setQ(q)
   }, [params])
 
   function set(k, v) { setForm((f) => ({ ...f, [k]: v })) }
@@ -71,7 +68,7 @@ export default function Users() {
     <div>
       <PageHead title="Users" subtitle="Create and manage user, service, guest, inetOrgPerson, and contact accounts.">
         <input className="search" placeholder="Search users" value={list.q} onChange={(e) => list.setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && list.reload()} />
-        <select value={list.type} onChange={(e) => { list.setType(e.target.value); setTimeout(list.reload, 0) }}>
+        <select value={list.type} onChange={(e) => list.setType(e.target.value)}>
           <option value="">All types</option>
           {USER_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
         </select>

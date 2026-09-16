@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export function PageHead({ title, subtitle, children }) {
   return (
@@ -35,30 +35,48 @@ export function Modal({ title, onClose, children }) {
   )
 }
 
-export function useQueryList(loader, deps = []) {
-  const [q, setQ] = useState('')
+export function useQueryList(loader, deps = [], options = {}) {
+  const [q, setQ] = useState(options.initialQ || '')
   const [type, setType] = useState('')
   const [data, setData] = useState({ items: [], total: 0 })
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
+  const loaderRef = useRef(loader)
+  loaderRef.current = loader
+  const mounted = useRef(true)
 
-  async function reload() {
+  useEffect(() => () => { mounted.current = false }, [])
+
+  const reload = useCallback(async (overrides = {}) => {
     setLoading(true)
     setErr('')
     try {
+      const nextQ = overrides.q !== undefined ? overrides.q : q
+      const nextType = overrides.type !== undefined ? overrides.type : type
       const params = new URLSearchParams()
-      if (q) params.set('q', q)
-      if (type) params.set('type', type)
+      if (nextQ) params.set('q', nextQ)
+      if (nextType) params.set('type', nextType)
+      if (overrides.page) params.set('page', String(overrides.page))
       const qs = params.toString() ? `?${params}` : ''
-      setData(await loader(qs))
+      const result = await loaderRef.current(qs)
+      if (mounted.current) setData(result)
     } catch (e) {
-      setErr(e.message)
+      if (mounted.current) setErr(e.message)
     } finally {
-      setLoading(false)
+      if (mounted.current) setLoading(false)
     }
-  }
+  }, [q, type])
 
   useEffect(() => { reload() }, [type, ...deps])
+
+  const first = useRef(true)
+  const debounce = options.debounce ?? 250
+  useEffect(() => {
+    if (first.current) { first.current = false; return }
+    if (!q) { reload({ q: '' }); return }
+    const t = setTimeout(() => reload({ q }), debounce)
+    return () => clearTimeout(t)
+  }, [q, debounce])
 
   return { q, setQ, type, setType, data, err, loading, reload }
 }

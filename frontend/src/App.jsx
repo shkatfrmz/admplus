@@ -22,6 +22,7 @@ import StaleCleanup from './pages/StaleCleanup.jsx'
 import BulkExport from './pages/BulkExport.jsx'
 import SecurityHealth from './pages/SecurityHealth.jsx'
 import Operators from './pages/Operators.jsx'
+import SearchResults from './pages/SearchResults.jsx'
 
 const coreLinks = [
   { to: '/', label: 'Dashboard', ico: 'dashboard' },
@@ -68,7 +69,7 @@ export default function App() {
     e.preventDefault()
     const term = q.trim()
     if (!term) return
-    nav(`/users?q=${encodeURIComponent(term)}`)
+    nav(`/search?q=${encodeURIComponent(term)}`)
   }
 
   const today = new Date().toLocaleDateString(undefined, { month: 'short', day: '2-digit' })
@@ -157,6 +158,7 @@ export default function App() {
             <Route path="/export" element={<BulkExport />} />
             <Route path="/security" element={<SecurityHealth />} />
             <Route path="/operators" element={<Operators />} />
+            <Route path="/search" element={<SearchResults />} />
             <Route path="/audit" element={<Audit />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/reports" element={<Reports />} />

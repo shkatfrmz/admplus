@@ -40,7 +40,7 @@ export default function Computers() {
     <div>
       <PageHead title="Computers" subtitle="Workstations, laptops, servers, and domain controllers.">
         <input className="search" placeholder="Search computers" value={list.q} onChange={(e) => list.setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && list.reload()} />
-        <select value={list.type} onChange={(e) => { list.setType(e.target.value); setTimeout(list.reload, 0) }}>
+        <select value={list.type} onChange={(e) => { list.setType(e.target.value) }}>
           <option value="">All types</option>
           {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
         </select>

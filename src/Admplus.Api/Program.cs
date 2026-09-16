@@ -56,20 +56,29 @@ app.Use(async (ctx, next) =>
 app.UseCors();
 app.MapFeatures();
 
-object Page<T>(IEnumerable<T> source, string? q, string? type, int page, int pageSize, Func<T, string>? typeOf = null)
+object Page<T>(IEnumerable<T> source, string? q, string? type, int page, int pageSize, Func<T, string>? typeOf = null, Func<T, string>? searchText = null)
 {
-    var items = source.ToList();
+    var items = source;
     if (!string.IsNullOrWhiteSpace(q))
     {
-        var needle = q.ToLowerInvariant();
-        items = items.Where(x => JsonSerializer.Serialize(x).ToLowerInvariant().Contains(needle)).ToList();
+        var needle = q.Trim();
+        items = searchText != null
+            ? items.Where(x => searchText(x).Contains(needle, StringComparison.OrdinalIgnoreCase))
+            : items.Where(x => JsonSerializer.Serialize(x).Contains(needle, StringComparison.OrdinalIgnoreCase));
     }
     if (!string.IsNullOrWhiteSpace(type) && typeOf != null)
-        items = items.Where(x => typeOf(x) == type).ToList();
+        items = items.Where(x => typeOf(x) == type);
     page = Math.Max(1, page);
     pageSize = Math.Clamp(pageSize, 1, 200);
-    return new { items = items.Skip((page - 1) * pageSize).Take(pageSize), total = items.Count, page, pageSize };
+    var list = items.ToList();
+    return new { items = list.Skip((page - 1) * pageSize).Take(pageSize), total = list.Count, page, pageSize };
 }
+
+string UserSearch(DirectoryUser u) => string.Join('\n', u.SamAccountName, u.DisplayName, u.GivenName, u.Surname, u.UserPrincipalName, u.Email, u.Department, u.Title, u.Office, u.Phone, u.Type, u.Dn);
+string ComputerSearch(DirectoryComputer c) => string.Join('\n', c.Name, c.DnsHostName, c.Os, c.OsVersion, c.Type, c.Description, c.ManagedBy, c.Dn);
+string GroupSearch(DirectoryGroup g) => string.Join('\n', g.Name, g.SamAccountName, g.Type, g.Scope, g.Description, g.Mail, g.Dn);
+string GpoSearch(DirectoryGpo g) => string.Join('\n', g.Name, g.Status, g.Description);
+string ShareSearch(DirectoryShare s) => string.Join('\n', s.Name, s.Path, s.Server, s.Description);
 
 string Mask(string? secret) => string.IsNullOrEmpty(secret) ? "" : "********";
 
@@ -487,7 +496,7 @@ app.MapPost("/api/settings/sync", (DirectoryStore store, ActiveDirectoryClient a
 });
 
 app.MapGet("/api/users", (DirectoryStore store, string? q, string? type, int page = 1, int pageSize = 50) =>
-    Results.Json(Page(store.Snapshot().Users, q, type, page, pageSize, u => u.Type)));
+    Results.Json(Page(store.Snapshot().Users, q, type, page, pageSize, u => u.Type, UserSearch)));
 
 app.MapGet("/api/users/{id}", (string id, DirectoryStore store) =>
 {
@@ -660,7 +669,7 @@ app.MapDelete("/api/users/{id}", (string id, DirectoryStore store, ActiveDirecto
 });
 
 app.MapGet("/api/computers", (DirectoryStore store, string? q, string? type, int page = 1, int pageSize = 50) =>
-    Results.Json(Page(store.Snapshot().Computers, q, type, page, pageSize, c => c.Type)));
+    Results.Json(Page(store.Snapshot().Computers, q, type, page, pageSize, c => c.Type, ComputerSearch)));
 
 app.MapGet("/api/computers/{id}", (string id, DirectoryStore store) =>
 {
@@ -772,7 +781,7 @@ app.MapDelete("/api/computers/{id}", (string id, DirectoryStore store, ActiveDir
 });
 
 app.MapGet("/api/groups", (DirectoryStore store, string? q, string? type, int page = 1, int pageSize = 50) =>
-    Results.Json(Page(store.Snapshot().Groups, q, type, page, pageSize, g => g.Type)));
+    Results.Json(Page(store.Snapshot().Groups, q, type, page, pageSize, g => g.Type, GroupSearch)));
 
 app.MapGet("/api/groups/{id}", (string id, DirectoryStore store) =>
 {
@@ -904,7 +913,7 @@ app.MapDelete("/api/groups/{id}", (string id, DirectoryStore store, ActiveDirect
 });
 
 app.MapGet("/api/gpos", (DirectoryStore store, string? q, string? type, int page = 1, int pageSize = 50) =>
-    Results.Json(Page(store.Snapshot().Gpos, q, type, page, pageSize, g => g.Status)));
+    Results.Json(Page(store.Snapshot().Gpos, q, type, page, pageSize, g => g.Status, GpoSearch)));
 
 app.MapGet("/api/gpos/{id}", (string id, DirectoryStore store) =>
 {
@@ -967,7 +976,7 @@ app.MapDelete("/api/gpos/{id}", (string id, DirectoryStore store) =>
 });
 
 app.MapGet("/api/shares", (DirectoryStore store, string? q, string? type, int page = 1, int pageSize = 50) =>
-    Results.Json(Page(store.Snapshot().Shares, q, type, page, pageSize)));
+    Results.Json(Page(store.Snapshot().Shares, q, type, page, pageSize, null, ShareSearch)));
 
 app.MapGet("/api/shares/{id}", (string id, DirectoryStore store) =>
 {
