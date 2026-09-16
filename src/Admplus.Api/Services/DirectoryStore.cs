@@ -106,7 +106,9 @@ public class DirectoryStore
     private void Persist()
     {
         var json = JsonSerializer.Serialize(_state, JsonOpts);
-        File.WriteAllText(_path, json);
+        var tmp = _path + ".tmp";
+        File.WriteAllText(tmp, json);
+        File.Move(tmp, _path, overwrite: true);
     }
 
     public static void Recycle(DirectoryState state, string objectType, string objectId, string name, string originalOu, object payload)
