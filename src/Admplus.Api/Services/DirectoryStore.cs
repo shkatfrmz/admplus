@@ -5,7 +5,8 @@ namespace Admplus.Api.Services;
 
 public class DirectoryStore
 {
-    private readonly string _path;
+    private readonly string _jsonPath;
+    private readonly SqlitePersistence _db;
     private readonly object _gate = new();
     private DirectoryState _state;
 
@@ -20,7 +21,8 @@ public class DirectoryStore
     {
         var dataDir = Path.Combine(env.ContentRootPath, "data");
         Directory.CreateDirectory(dataDir);
-        _path = Path.Combine(dataDir, "store.json");
+        _jsonPath = Path.Combine(dataDir, "store.json");
+        _db = new SqlitePersistence(Path.Combine(dataDir, "admplus.db"));
         _state = LoadOrSeed();
     }
 
@@ -103,13 +105,7 @@ public class DirectoryStore
     public static string NewId(string prefix) =>
         $"{prefix}-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds():x}-{Guid.NewGuid().ToString("n")[..6]}";
 
-    private void Persist()
-    {
-        var json = JsonSerializer.Serialize(_state, JsonOpts);
-        var tmp = _path + ".tmp";
-        File.WriteAllText(tmp, json);
-        File.Move(tmp, _path, overwrite: true);
-    }
+    private void Persist() => _db.Save(_state);
 
     public static void Recycle(DirectoryState state, string objectType, string objectId, string name, string originalOu, object payload)
     {
@@ -129,23 +125,26 @@ public class DirectoryStore
 
     private DirectoryState LoadOrSeed()
     {
-        if (File.Exists(_path))
+        var fromDb = _db.Load();
+        if (fromDb != null)
         {
-            var json = File.ReadAllText(_path);
-            var loaded = JsonSerializer.Deserialize<DirectoryState>(json, JsonOpts) ?? Seed();
-            EnsureFeatureDefaults(loaded);
-            PersistLoaded(loaded);
-            return loaded;
+            EnsureFeatureDefaults(fromDb);
+            return fromDb;
         }
-        var seeded = Seed();
-        File.WriteAllText(_path, JsonSerializer.Serialize(seeded, JsonOpts));
-        return seeded;
-    }
 
-    private void PersistLoaded(DirectoryState state)
-    {
-        _state = state;
-        Persist();
+        DirectoryState loaded;
+        if (File.Exists(_jsonPath))
+        {
+            var json = File.ReadAllText(_jsonPath);
+            loaded = JsonSerializer.Deserialize<DirectoryState>(json, JsonOpts) ?? Seed();
+        }
+        else
+        {
+            loaded = Seed();
+        }
+        EnsureFeatureDefaults(loaded);
+        _db.Save(loaded);
+        return loaded;
     }
 
     private static void EnsureFeatureDefaults(DirectoryState s)
